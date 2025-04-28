@@ -1,0 +1,47 @@
+# nixpacks.toml configuration for go-sse
+
+[phases.setup]
+aptPkgs = ["make", "gcc", "git"]
+
+[phases.build]
+cmds = [
+  "go mod download",
+  "go build -o bin/go-sse ./cmd/server"
+]
+
+[start]
+cmd = "./bin/go-sse"
+
+[variables]
+PORT = "8080"
+
+[nginx]
+enableSameSite = true
+
+# Enable HTTP/2
+[nginx.http2]
+enabled = true
+
+# Set specific headers for SSE
+[[nginx.headers]]
+for = "/events"
+values = {
+  "Cache-Control" = "no-cache",
+  "Connection" = "keep-alive",
+  "X-Accel-Buffering" = "no"
+}
+
+# Configure timeouts appropriately for SSE connections
+[nginx.config]
+proxy_read_timeout = "3600s" # 1 hour
+proxy_send_timeout = "3600s" # 1 hour
+keepalive_timeout = "650s"   # Keep connections alive longer
+proxy_buffering = "off"     # Don't buffer for SSE
+
+# Health check configuration
+[healthcheck]
+cmd = "curl -f http://localhost:$PORT/health || exit 1"
+interval = "30s"
+timeout = "5s"
+retries = 3
+startPeriod = "10s"
