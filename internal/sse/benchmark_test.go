@@ -2,7 +2,7 @@ package sse_test
 
 import (
 	"context"
-	"net/http"
+	"fmt"
 	"net/http/httptest"
 	"sync"
 	"testing"
