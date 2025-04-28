@@ -26,3 +26,7 @@ bin/
 
 # OS specific files
 .DS_Store
+
+# SSL certificates
+/nginx/certs/*.crt
+/nginx/certs/*.key
