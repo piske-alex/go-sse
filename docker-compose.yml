@@ -9,13 +9,53 @@ services:
       - "8080:8080"
     environment:
       - PORT=8080
+      - STORE_TYPE=${STORE_TYPE:-memory}
+      - MONGO_URI=mongodb://mongo:27017
+      - MONGO_DB_NAME=gosse
+      - MONGO_COLLECTION=kv_store
+      - MONGO_DOCUMENT_ID=main
     restart: unless-stopped
+    depends_on:
+      - mongo
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # MongoDB for persistence
+  mongo:
+    image: mongo:5
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    restart: unless-stopped
+    # Only start MongoDB when STORE_TYPE=mongo
+    profiles: ["with-mongo"]
+    environment:
+      - MONGO_INITDB_DATABASE=gosse
+    healthcheck:
+      test: mongosh --eval 'db.runCommand("ping").ok' localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Optional MongoDB admin interface
+  mongo-express:
+    image: mongo-express
+    ports:
+      - "8081:8081"
+    environment:
+      - ME_CONFIG_MONGODB_SERVER=mongo
+      - ME_CONFIG_MONGODB_PORT=27017
+    depends_on:
+      - mongo
+    restart: unless-stopped
+    # Only start with MongoDB when STORE_TYPE=mongo
+    profiles: ["with-mongo"]
 
   # Optional Nginx for SSL termination and load balancing
   nginx:
@@ -37,9 +77,12 @@ services:
   test-client:
     image: nginx:alpine
     ports:
-      - "8081:80"
+      - "9090:80"
     volumes:
       - ./examples:/usr/share/nginx/html:ro
     restart: unless-stopped
     # Run this service only when explicitly requested
     profiles: ["with-client"]
+
+volumes:
+  mongo-data:
