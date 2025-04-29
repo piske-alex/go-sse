@@ -1,14 +1,31 @@
 # go-sse
 
-An efficient Go-based SSE (Server-Sent Events) server with JQ-style query support for an in-memory key-value store.
+An efficient Go-based SSE (Server-Sent Events) server with JQ-style query support for in-memory or MongoDB key-value store.
 
 ## Features
 
 - Low-latency event delivery to clients
 - Scalable connection handling using goroutines
-- In-memory key-value store with JQ-style queries
+- Support for MongoDB for large JSON document storage
+- In-memory key-value store option for simpler deployments
+- JQ-style queries for data access and filtering
 - Client filtering capabilities
 - HTTP API for store management
+
+## Storage Options
+
+### In-Memory Store
+
+- Fast and simple for development and smaller deployments
+- No external dependencies required
+- Limited by available memory
+
+### MongoDB Store
+
+- Supports very large JSON documents (up to 16MB)
+- Atomic operations on large documents
+- Persistence across restarts
+- Change stream integration for real-time updates
 
 ## Installation
 
@@ -17,6 +34,55 @@ go get github.com/piske-alex/go-sse
 ```
 
 ## Quick Start
+
+### Configuration
+
+Create a `.env` file based on the example:
+
+```bash
+cp .env.example .env
+```
+
+Edit the `.env` file to configure your preferred storage option:
+
+```
+# Server configuration
+PORT=8080
+
+# Store configuration
+# Options: memory, mongo
+STORE_TYPE=mongo
+
+# MongoDB configuration (only used when STORE_TYPE=mongo)
+MONGO_URI=mongodb://localhost:27017
+MONGO_DB_NAME=gosse
+MONGO_COLLECTION=kv_store
+MONGO_DOCUMENT_ID=main
+```
+
+### Running with Docker Compose
+
+```bash
+# With in-memory store
+export STORE_TYPE=memory
+docker-compose up -d
+
+# With MongoDB
+export STORE_TYPE=mongo
+docker-compose --profile with-mongo up -d
+
+# With MongoDB and client example
+export STORE_TYPE=mongo
+docker-compose --profile with-mongo --profile with-client up -d
+```
+
+### Running Locally
+
+```bash
+go run ./cmd/server/main.go
+```
+
+Or as a custom application:
 
 ```go
 package main
@@ -73,6 +139,22 @@ Content-Type: application/json
 ```
 GET /store?path=.data.users[*]
 ```
+
+## Documentation
+
+- [Using JQ-Style Paths](docs/using_jq_paths.md)
+- [Performance Considerations](docs/performance.md)
+- [Deployment Guide](docs/deployment.md)
+- [MongoDB Setup](docs/mongodb_setup.md)
+
+## Connection Capacity
+
+The go-sse server can typically handle:
+
+- **~10,000 concurrent SSE connections** on a standard server with 4-8GB RAM
+- **~50,000+ concurrent connections** on more powerful hardware with proper tuning
+
+The MongoDB integration allows for handling very large JSON documents (up to 16MB per document) with atomic operations.
 
 ## License
 
