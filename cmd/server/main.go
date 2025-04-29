@@ -9,20 +9,41 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/piske-alex/go-sse/internal/api"
 	"github.com/piske-alex/go-sse/internal/sse"
 	"github.com/piske-alex/go-sse/internal/store"
 )
 
 func main() {
+	// Load environment variables from .env file if it exists
+	godotenv.Load()
+
 	// Get the port from the environment or use default
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
+	// Get the store type from environment or use default
+	storeType := os.Getenv("STORE_TYPE")
+	var storeTypeEnum store.StoreType
+	switch storeType {
+	case "mongo":
+		storeTypeEnum = store.MongoStore
+		log.Println("Using MongoDB store")
+	default:
+		storeTypeEnum = store.MemoryStore
+		log.Println("Using in-memory store")
+	}
+
+	// Create the store
+	kvStore, err := store.CreateStore(storeTypeEnum)
+	if err != nil {
+		log.Fatalf("Failed to create store: %v", err)
+	}
+
 	// Create components
-	kvStore := store.NewStore()
 	sseServer := sse.NewServer(kvStore)
 	apiHandler := api.NewHandler(kvStore, sseServer)
 	router := api.SetupRouter(apiHandler)
