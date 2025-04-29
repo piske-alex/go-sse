@@ -1,9 +1,10 @@
 package store
 
 import (
-	"errors"
 	"fmt"
 	"os"
+
+	"github.com/piske-alex/go-sse/internal/query"
 )
 
 // StoreType defines the type of store to create
@@ -40,7 +41,7 @@ type StoreInterface interface {
 	ToJSON() ([]byte, error)
 
 	// FindMatches finds all values matching a path expression
-	FindMatches(path string) ([]interface{}, error)
+	FindMatches(path string) ([]query.MatchResult, error)
 }
 
 // CreateStore creates a store of the specified type
