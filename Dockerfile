@@ -23,7 +23,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o go-sse ./cmd/serv
 # Final stage
 FROM alpine:latest
 
-# Install certificates for HTTPS
+# Install certificates for HTTPS and MongoDB connection
 RUN apk --no-cache add ca-certificates
 
 # Set working directory
@@ -44,6 +44,12 @@ USER appuser
 
 # Define environment variables
 ENV PORT=8080
+ENV STORE_TYPE=memory
+# MongoDB configuration (only used when STORE_TYPE=mongo)
+ENV MONGO_URI=mongodb://mongo:27017
+ENV MONGO_DB_NAME=gosse
+ENV MONGO_COLLECTION=kv_store
+ENV MONGO_DOCUMENT_ID=main
 
 # Run the binary
 CMD ["./go-sse"]
