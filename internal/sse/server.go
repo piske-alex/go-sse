@@ -11,7 +11,7 @@ import (
 
 // Server manages SSE client connections and broadcasting
 type Server struct {
-	store          *store.Store
+	store          interface{}  // Generalized to work with any store implementation
 	clients        map[string]*Client
 	clientsMutex   sync.RWMutex
 	maxClients     int
@@ -21,7 +21,7 @@ type Server struct {
 }
 
 // NewServer creates a new SSE server instance
-func NewServer(store *store.Store) *Server {
+func NewServer(store interface{}) *Server {
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 
 	s := &Server{
@@ -32,6 +32,13 @@ func NewServer(store *store.Store) *Server {
 		cleanupTicker:  time.NewTicker(5 * time.Minute),
 		cleanupContext: cleanupCtx,
 		cleanupCancel:  cleanupCancel,
+	}
+
+	// Register change listener for MongoDB store if applicable
+	if mongoStore, ok := store.(*store.MongoStore); ok {
+		mongoStore.SetChangeListener(func(path string, value interface{}) {
+			s.BroadcastEvent(path, value, "update")
+		})
 	}
 
 	// Start the cleanup goroutine
@@ -132,6 +139,11 @@ func (s *Server) Shutdown() {
 	for id, client := range s.clients {
 		client.Close()
 		delete(s.clients, id)
+	}
+
+	// Disconnect MongoDB store if applicable
+	if mongoStore, ok := s.store.(*store.MongoStore); ok {
+		mongoStore.Disconnect()
 	}
 }
 
