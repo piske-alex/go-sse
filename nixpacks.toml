@@ -1,4 +1,4 @@
-# nixpacks.toml configuration for go-sse
+# nixpacks.toml configuration for go-sse with MongoDB support
 
 [phases.setup]
 aptPkgs = ["make", "gcc", "git"]
@@ -14,6 +14,11 @@ cmd = "./bin/go-sse"
 
 [variables]
 PORT = "8080"
+STORE_TYPE = "mongo"
+MONGO_URI = "$MONGO_URI"
+MONGO_DB_NAME = "$MONGO_DB_NAME"
+MONGO_COLLECTION = "$MONGO_COLLECTION"
+MONGO_DOCUMENT_ID = "$MONGO_DOCUMENT_ID"
 
 [nginx]
 enableSameSite = true
@@ -33,10 +38,14 @@ values = {
 
 # Configure timeouts appropriately for SSE connections
 [nginx.config]
-proxy_read_timeout = "3600s" # 1 hour
-proxy_send_timeout = "3600s" # 1 hour
-keepalive_timeout = "650s"   # Keep connections alive longer
-proxy_buffering = "off"     # Don't buffer for SSE
+proxy_read_timeout = "3600s"     # 1 hour for SSE connections
+proxy_send_timeout = "3600s"     # 1 hour for SSE connections
+keepalive_timeout = "650s"       # Keep connections alive longer
+proxy_buffering = "off"          # Don't buffer for SSE
+client_max_body_size = "20M"     # Support large POST requests up to 20MB
+sendfile = "on"                  # Enable sendfile for better performance
+tcp_nopush = "on"                # Optimize for throughput
+tcp_nodelay = "on"               # Reduce latency
 
 # Health check configuration
 [healthcheck]
