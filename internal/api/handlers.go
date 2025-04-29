@@ -13,12 +13,12 @@ import (
 
 // Handler manages the HTTP API handlers
 type Handler struct {
-	Store     *store.Store
+	Store     interface{} // Generalized to work with any store type
 	SSEServer *sse.Server
 }
 
 // NewHandler creates a new API handler
-func NewHandler(store *store.Store, sseServer *sse.Server) *Handler {
+func NewHandler(store interface{}, sseServer *sse.Server) *Handler {
 	return &Handler{
 		Store:     store,
 		SSEServer: sseServer,
@@ -67,8 +67,19 @@ func (h *Handler) HandleStoreInitialize(w http.ResponseWriter, r *http.Request) 
 	}
 	defer r.Body.Close()
 
-	// Initialize store with JSON data
-	err = h.Store.InitializeFromJSON(body)
+	// Handle based on store type
+	switch s := h.Store.(type) {
+	case *store.Store: // In-memory store
+		err = s.InitializeFromJSON(body)
+	
+	case *store.MongoStore: // MongoDB store
+		err = s.InitializeFromJSON(body)
+	
+	default:
+		http.Error(w, "Unsupported store type", http.StatusInternalServerError)
+		return
+	}
+
 	if err != nil {
 		http.Error(w, "Invalid JSON data: "+err.Error(), http.StatusBadRequest)
 		return
@@ -105,15 +116,39 @@ func (h *Handler) HandleStoreUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	// Update store with JSON data
-	err = h.Store.SetFromJSON(path, body)
+	// Handle based on store type
+	switch s := h.Store.(type) {
+	case *store.Store: // In-memory store
+		err = s.SetFromJSON(path, body)
+	
+	case *store.MongoStore: // MongoDB store
+		err = s.SetFromJSON(path, body)
+		
+	default:
+		http.Error(w, "Unsupported store type", http.StatusInternalServerError)
+		return
+	}
+
 	if err != nil {
 		http.Error(w, "Error updating store: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	// Get the updated value for broadcasting
-	updatedValue, err := h.Store.Get(path)
+	var updatedValue interface{}
+
+	switch s := h.Store.(type) {
+	case *store.Store: // In-memory store
+		updatedValue, err = s.Get(path)
+	
+	case *store.MongoStore: // MongoDB store
+		updatedValue, err = s.Get(path)
+		
+	default:
+		http.Error(w, "Unsupported store type", http.StatusInternalServerError)
+		return
+	}
+
 	if err != nil {
 		// If we can't get the value, still return success but don't broadcast
 		w.Header().Set("Content-Type", "application/json")
@@ -146,10 +181,30 @@ func (h *Handler) HandleStoreQuery(w http.ResponseWriter, r *http.Request) {
 
 	if strings.Contains(path, "*") {
 		// Path contains wildcards, use FindMatches
-		result, err = h.Store.FindMatches(path)
+		switch s := h.Store.(type) {
+		case *store.Store: // In-memory store
+			result, err = s.FindMatches(path)
+		
+		case *store.MongoStore: // MongoDB store
+			result, err = s.FindMatches(path)
+			
+		default:
+			http.Error(w, "Unsupported store type", http.StatusInternalServerError)
+			return
+		}
 	} else {
 		// Simple path, use Get
-		result, err = h.Store.Get(path)
+		switch s := h.Store.(type) {
+		case *store.Store: // In-memory store
+			result, err = s.Get(path)
+		
+		case *store.MongoStore: // MongoDB store
+			result, err = s.Get(path)
+			
+		default:
+			http.Error(w, "Unsupported store type", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	if err != nil {
@@ -174,6 +229,16 @@ func (h *Handler) HandleMetrics(w http.ResponseWriter, r *http.Request) {
 	metrics := map[string]interface{}{
 		"clients": h.SSEServer.ClientCount(),
 		"time":    time.Now().UnixNano() / int64(time.Millisecond),
+	}
+
+	// Add store type
+	switch h.Store.(type) {
+	case *store.Store:
+		metrics["store_type"] = "memory"
+	case *store.MongoStore:
+		metrics["store_type"] = "mongodb"
+	default:
+		metrics["store_type"] = "unknown"
 	}
 
 	// Return metrics as JSON
