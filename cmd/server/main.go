@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -24,6 +25,18 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
+
+	// Get max request size from environment or use default (20MB)
+	maxRequestSize := os.Getenv("MAX_REQUEST_SIZE_MB")
+	maxRequestSizeMB := 20 // Default to 20MB
+	if maxRequestSize != "" {
+		if size, err := strconv.Atoi(maxRequestSize); err == nil && size > 0 {
+			maxRequestSizeMB = size
+		}
+	}
+	// Convert to bytes
+	maxBodyBytes := int64(maxRequestSizeMB * 1024 * 1024)
+	log.Printf("Maximum request body size: %dMB", maxRequestSizeMB)
 
 	// Get the store type from environment or use default
 	storeType := os.Getenv("STORE_TYPE")
@@ -48,12 +61,17 @@ func main() {
 	apiHandler := api.NewHandler(kvStore, sseServer)
 	router := api.SetupRouter(apiHandler)
 
-	// Create HTTP server
+	// Create HTTP server with middleware for large requests
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 60 * time.Second, // Longer timeout for SSE connections
+		Addr:    ":" + port,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Set body size limit based on route
+			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+			router.ServeHTTP(w, r)
+		}),
+		ReadTimeout:  120 * time.Second, // Increased for large uploads
+		WriteTimeout: 120 * time.Second, // Increased for large responses
+		IdleTimeout:  240 * time.Second, // Keep idle connections open longer
 	}
 
 	// Start server in a goroutine
@@ -72,7 +90,7 @@ func main() {
 	log.Println("Shutting down server...")
 
 	// Shutdown HTTP server
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Increased shutdown timeout
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
