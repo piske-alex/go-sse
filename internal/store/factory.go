@@ -2,7 +2,9 @@ package store
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"strings"
 
 	"github.com/piske-alex/go-sse/internal/query"
 )
@@ -44,6 +46,78 @@ type StoreInterface interface {
 	FindMatches(path string) ([]query.MatchResult, error)
 }
 
+// BuildMongoURI constructs a MongoDB connection URI from individual components or uses a complete URI
+func BuildMongoURI() string {
+	// Check if a complete URI is provided
+	uri := os.Getenv("MONGO_URI")
+	if uri != "" {
+		// If URI already contains credentials, use it directly
+		if strings.Contains(uri, "@") {
+			log.Println("Using fully configured MongoDB URI from MONGO_URI")
+			return uri
+		}
+		
+		// If URI doesn't contain credentials, check for separate username/password
+		user := os.Getenv("MONGO_USER")
+		pass := os.Getenv("MONGO_PASSWORD")
+		
+		if user != "" && pass != "" {
+			// Extract the protocol and host parts
+			parts := strings.SplitN(uri, "://", 2)
+			if len(parts) != 2 {
+				log.Println("MONGO_URI format not recognized, using as-is")
+				return uri
+			}
+			
+			protocol := parts[0]
+			host := parts[1]
+			
+			// Construct URI with credentials
+			uri = fmt.Sprintf("%s://%s:%s@%s", protocol, user, pass, host)
+			log.Println("Built MongoDB URI with credentials from MONGO_USER and MONGO_PASSWORD")
+			return uri
+		}
+		
+		// No credentials provided, use URI as-is
+		log.Println("Using MongoDB URI without authentication")
+		return uri
+	}
+	
+	// No URI provided, build one from individual components
+	host := os.Getenv("MONGO_HOST")
+	port := os.Getenv("MONGO_PORT")
+	user := os.Getenv("MONGO_USER")
+	pass := os.Getenv("MONGO_PASSWORD")
+	auth := os.Getenv("MONGO_AUTH_DB")
+	
+	// Set defaults
+	if host == "" {
+		host = "localhost"
+	}
+	
+	if port == "" {
+		port = "27017"
+	}
+	
+	if auth == "" {
+		auth = "admin"
+	}
+	
+	// Build the URI
+	if user != "" && pass != "" {
+		// With authentication
+		uri = fmt.Sprintf("mongodb://%s:%s@%s:%s/?authSource=%s", 
+			user, pass, host, port, auth)
+		log.Println("Built MongoDB URI with credentials from individual components")
+	} else {
+		// Without authentication
+		uri = fmt.Sprintf("mongodb://%s:%s", host, port)
+		log.Println("Built MongoDB URI without authentication from individual components")
+	}
+	
+	return uri
+}
+
 // CreateStore creates a store of the specified type
 func CreateStore(storeType StoreType) (interface{}, error) {
 	switch storeType {
@@ -51,11 +125,8 @@ func CreateStore(storeType StoreType) (interface{}, error) {
 		return NewStore(), nil
 
 	case MongoStore:
-		// Get MongoDB connection details from environment variables
-		uri := os.Getenv("MONGO_URI")
-		if uri == "" {
-			uri = "mongodb://localhost:27017"
-		}
+		// Build the MongoDB URI with proper authentication
+		uri := BuildMongoURI()
 
 		dbName := os.Getenv("MONGO_DB_NAME")
 		if dbName == "" {
