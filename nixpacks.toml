@@ -15,10 +15,24 @@ cmd = "./bin/go-sse"
 [variables]
 PORT = "8080"
 STORE_TYPE = "mongo"
+
+# MongoDB configuration (only used when STORE_TYPE=mongo)
+# Option 1: Full connection string
 MONGO_URI = "$MONGO_URI"
+
+# Option 2: Individual components for connection
+# MONGO_HOST = "$MONGO_HOST"
+# MONGO_PORT = "$MONGO_PORT"
+# MONGO_USER = "$MONGO_USER"
+# MONGO_PASSWORD = "$MONGO_PASSWORD"
+# MONGO_AUTH_DB = "$MONGO_AUTH_DB"
+
+# MongoDB database configuration
 MONGO_DB_NAME = "$MONGO_DB_NAME"
 MONGO_COLLECTION = "$MONGO_COLLECTION"
 MONGO_DOCUMENT_ID = "$MONGO_DOCUMENT_ID"
+
+# Request size configuration
 MAX_REQUEST_SIZE_MB = "20"
 
 # Health check configuration
