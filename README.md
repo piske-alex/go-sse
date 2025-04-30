@@ -11,6 +11,7 @@ An efficient Go-based SSE (Server-Sent Events) server with JQ-style query suppor
 - JQ-style queries for data access and filtering
 - Client filtering capabilities
 - HTTP API for store management
+- Support for large POST requests (up to 20MB)
 
 ## Storage Options
 
@@ -26,6 +27,7 @@ An efficient Go-based SSE (Server-Sent Events) server with JQ-style query suppor
 - Atomic operations on large documents
 - Persistence across restarts
 - Change stream integration for real-time updates
+- Authentication support for secure deployments
 
 ## Installation
 
@@ -53,11 +55,23 @@ PORT=8080
 # Options: memory, mongo
 STORE_TYPE=mongo
 
-# MongoDB configuration (only used when STORE_TYPE=mongo)
-MONGO_URI=mongodb://localhost:27017
+# MongoDB configuration - Option 1: Connection string
+MONGO_URI=mongodb://username:password@localhost:27017/gosse?authSource=admin
+
+# MongoDB configuration - Option 2: Individual components
+# MONGO_HOST=localhost
+# MONGO_PORT=27017
+# MONGO_USER=username
+# MONGO_PASSWORD=password
+# MONGO_AUTH_DB=admin
+
+# MongoDB database settings
 MONGO_DB_NAME=gosse
 MONGO_COLLECTION=kv_store
 MONGO_DOCUMENT_ID=main
+
+# Request size limit
+MAX_REQUEST_SIZE_MB=20
 ```
 
 ### Running with Docker Compose
@@ -67,8 +81,12 @@ MONGO_DOCUMENT_ID=main
 export STORE_TYPE=memory
 docker-compose up -d
 
-# With MongoDB
+# With MongoDB (uses default admin/password credentials)
 export STORE_TYPE=mongo
+docker-compose --profile with-mongo up -d
+
+# With MongoDB using custom credentials
+export STORE_TYPE=mongo MONGO_USER=myuser MONGO_PASSWORD=mypassword
 docker-compose --profile with-mongo up -d
 
 # With MongoDB and client example
@@ -146,6 +164,8 @@ GET /store?path=.data.users[*]
 - [Performance Considerations](docs/performance.md)
 - [Deployment Guide](docs/deployment.md)
 - [MongoDB Setup](docs/mongodb_setup.md)
+- [MongoDB Authentication](docs/mongodb_auth.md)
+- [Deployment with Nixpacks](docs/deployment_with_nixpacks.md)
 
 ## Connection Capacity
 
