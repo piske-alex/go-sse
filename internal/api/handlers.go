@@ -15,7 +15,7 @@ import (
 
 // Handler manages the HTTP API handlers
 type Handler struct {
-	Store     interface{} // Generalized to work with any store type
+	Store     store.Store // Use store.Store interface instead of interface{}
 	SSEServer *sse.Server
 }
 
@@ -34,9 +34,9 @@ type SuccessResponse struct {
 }
 
 // NewHandler creates a new API handler
-func NewHandler(store interface{}, sseServer *sse.Server) *Handler {
+func NewHandler(dataStore store.Store, sseServer *sse.Server) *Handler {
 	return &Handler{
-		Store:     store,
+		Store:     dataStore,
 		SSEServer: sseServer,
 	}
 }
@@ -134,18 +134,8 @@ func (h *Handler) HandleStoreInitialize(w http.ResponseWriter, r *http.Request) 
 	// Log operation
 	log.Printf("Initializing store with %d bytes of JSON data", len(body))
 
-	// Handle based on store type
-	switch s := h.Store.(type) {
-	case *store.Store: // In-memory store
-		err = s.InitializeFromJSON(body)
-	
-	case *store.MongoStore: // MongoDB store
-		err = s.InitializeFromJSON(body)
-	
-	default:
-		sendJSONError(w, http.StatusInternalServerError, "store_error", "Unsupported store type")
-		return
-	}
+	// Use the Store interface directly, no need for type switch
+	err = h.Store.InitializeFromJSON(body)
 
 	if err != nil {
 		log.Printf("Error initializing store: %v", err)
@@ -204,18 +194,8 @@ func (h *Handler) HandleStoreUpdate(w http.ResponseWriter, r *http.Request) {
 	// Log operation
 	log.Printf("Updating store at path '%s' with %d bytes of JSON data", path, len(body))
 
-	// Handle based on store type
-	switch s := h.Store.(type) {
-	case *store.Store: // In-memory store
-		err = s.SetFromJSON(path, body)
-	
-	case *store.MongoStore: // MongoDB store
-		err = s.SetFromJSON(path, body)
-		
-	default:
-		sendJSONError(w, http.StatusInternalServerError, "store_error", "Unsupported store type")
-		return
-	}
+	// Use the Store interface directly
+	err = h.Store.SetFromJSON(path, body)
 
 	if err != nil {
 		log.Printf("Error updating store: %v", err)
@@ -223,31 +203,16 @@ func (h *Handler) HandleStoreUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get the updated value for broadcasting
-	var updatedValue interface{}
-
-	switch s := h.Store.(type) {
-	case *store.Store: // In-memory store
-		updatedValue, err = s.Get(path)
-	
-	case *store.MongoStore: // MongoDB store
-		updatedValue, err = s.Get(path)
-		
-	default:
-		sendJSONError(w, http.StatusInternalServerError, "store_error", "Unsupported store type")
-		return
-	}
-
+	// Get the updated value
+	value, err := h.Store.Get(path)
 	if err != nil {
-		// If we can't get the value, still return success but don't broadcast
-		sendJSONSuccess(w, nil, fmt.Sprintf("Path '%s' updated successfully, but could not retrieve the new value", path))
-		return
+		log.Printf("Error getting updated value: %v", err)
+	} else {
+		// Broadcast update event if value was retrieved successfully
+		h.SSEServer.BroadcastEvent(path, value, "update")
 	}
 
-	// Broadcast update event
-	h.SSEServer.BroadcastEvent(path, updatedValue, "update")
-
-	// Return success response with information about the operation
+	// Return success response
 	sendJSONSuccess(w, map[string]interface{}{
 		"path":       path,
 		"size_bytes": len(body),
@@ -266,43 +231,32 @@ func (h *Handler) HandleStoreQuery(w http.ResponseWriter, r *http.Request) {
 	// Get path from query parameter
 	path := r.URL.Query().Get("path")
 	if path == "" {
-		// Default to root if no path provided
-		path = "."
+		sendJSONError(w, http.StatusBadRequest, "missing_parameter", "Missing path parameter")
+		return
+	}
+
+	// Check if this is a pattern match query
+	isPattern := false
+	patternParam := r.URL.Query().Get("pattern")
+	if patternParam == "true" {
+		isPattern = true
 	}
 
 	// Log operation
-	log.Printf("Querying store at path '%s'", path)
+	log.Printf("Querying store at path '%s' (pattern: %v)", path, isPattern)
 
-	// Query the store
-	var result interface{}
-	var err error
+	// Different handling for pattern matches vs direct query
+	var (
+		result interface{}
+		err    error
+	)
 
-	if strings.Contains(path, "*") {
-		// Path contains wildcards, use FindMatches
-		switch s := h.Store.(type) {
-		case *store.Store: // In-memory store
-			result, err = s.FindMatches(path)
-		
-		case *store.MongoStore: // MongoDB store
-			result, err = s.FindMatches(path)
-			
-		default:
-			sendJSONError(w, http.StatusInternalServerError, "store_error", "Unsupported store type")
-			return
-		}
+	if isPattern {
+		// Pattern match query, use FindMatches
+		result, err = h.Store.FindMatches(path)
 	} else {
 		// Simple path, use Get
-		switch s := h.Store.(type) {
-		case *store.Store: // In-memory store
-			result, err = s.Get(path)
-		
-		case *store.MongoStore: // MongoDB store
-			result, err = s.Get(path)
-			
-		default:
-			sendJSONError(w, http.StatusInternalServerError, "store_error", "Unsupported store type")
-			return
-		}
+		result, err = h.Store.Get(path)
 	}
 
 	if err != nil {
@@ -356,9 +310,9 @@ func (h *Handler) HandleMetrics(w http.ResponseWriter, r *http.Request) {
 		"store_type": "unknown",
 	}
 
-	// Add store type
+	// Add store type by checking concrete type
 	switch h.Store.(type) {
-	case *store.Store:
+	case *store.KVStore:
 		metrics["store_type"] = "memory"
 	case *store.MongoStore:
 		metrics["store_type"] = "mongodb"

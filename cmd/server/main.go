@@ -43,7 +43,7 @@ func main() {
 	var storeTypeEnum store.StoreType
 	switch storeType {
 	case "mongo":
-		storeTypeEnum = store.MongoStore
+		storeTypeEnum = store.MongoStoreType
 		log.Println("Using MongoDB store")
 	default:
 		storeTypeEnum = store.MemoryStore

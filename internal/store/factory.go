@@ -15,8 +15,8 @@ type StoreType string
 const (
 	// MemoryStore is an in-memory key-value store
 	MemoryStore StoreType = "memory"
-	// MongoStore is a MongoDB-backed store
-	MongoStore StoreType = "mongo"
+	// MongoStoreType is a MongoDB-backed store
+	MongoStoreType StoreType = "mongo"
 )
 
 // StoreInterface defines the interface for a key-value store
@@ -119,12 +119,12 @@ func BuildMongoURI() string {
 }
 
 // CreateStore creates a store of the specified type
-func CreateStore(storeType StoreType) (interface{}, error) {
+func CreateStore(storeType StoreType) (Store, error) {
 	switch storeType {
 	case MemoryStore:
 		return NewStore(), nil
 
-	case MongoStore:
+	case MongoStoreType:
 		// Build the MongoDB URI with proper authentication
 		uri := BuildMongoURI()
 

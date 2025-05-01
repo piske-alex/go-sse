@@ -74,14 +74,14 @@ func NewMongoStore(uri, dbName, collectionName, documentID string) (*MongoStore,
 func (s *MongoStore) setupChangeStream() {
 	// Create a pipeline that filters for updates to our document
 	pipeline := mongo.Pipeline{
-		{{
-			"$match": bson.D{
+		bson.D{
+			{"$match", bson.D{
 				{"operationType", bson.D{
 					{"$in", bson.A{"update", "replace", "insert"}},
 				}},
 				{"documentKey._id", s.documentID},
-			},
-		}},
+			}},
+		},
 	}
 
 	// Create options with full document return
@@ -198,7 +198,7 @@ func (s *MongoStore) Get(path string) (interface{}, error) {
 		return doc.Data, nil
 	}
 
-	// Use the query package to navigate the path
+	// Parse the path and navigate the data
 	matcher := query.NewMatcher()
 	result, err := matcher.Get(doc.Data, path)
 	if err != nil {
@@ -217,53 +217,57 @@ func (s *MongoStore) Set(path string, value interface{}) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// If path is empty or ".", replace the entire document
-	if path == "" || path == "." {
-		// Ensure value is a map
-		valMap, ok := value.(map[string]interface{})
-		if !ok {
-			return errors.New("value must be a map when setting root")
-		}
-
-		// Replace the document
-		doc := Document{
-			ID:   s.documentID,
-			Data: valMap,
-		}
-
-		_, err := s.collection.ReplaceOne(
-			ctx,
-			bson.M{"_id": s.documentID},
-			doc,
-			options.Replace().SetUpsert(true),
-		)
-
-		return err
-	}
-
-	// For non-root paths, we need to get the document first
+	// First, get the document
 	var doc Document
 	err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
-			// Create a new document with the path set
-			doc = Document{
-				ID:   s.documentID,
-				Data: make(map[string]interface{}),
+			// Document doesn't exist, create a new one
+			if path == "" || path == "." {
+				// If path is root, simply store the value as is (if it's a map)
+				valueMap, ok := value.(map[string]interface{})
+				if !ok {
+					return errors.New("value must be a map when setting root")
+				}
+				doc = Document{
+					ID:   s.documentID,
+					Data: valueMap,
+				}
+			} else {
+				// Otherwise, create an empty map and set the value at the path
+				doc = Document{
+					ID:   s.documentID,
+					Data: make(map[string]interface{}),
+				}
+				matcher := query.NewMatcher()
+				err = matcher.Set(doc.Data, path, value)
+				if err != nil {
+					return err
+				}
 			}
 		} else {
 			return err
 		}
+	} else {
+		// Document exists, update it at the specified path
+		if path == "" || path == "." {
+			// If path is root, simply replace the entire data (if it's a map)
+			valueMap, ok := value.(map[string]interface{})
+			if !ok {
+				return errors.New("value must be a map when setting root")
+			}
+			doc.Data = valueMap
+		} else {
+			// Otherwise, set the value at the specified path
+			matcher := query.NewMatcher()
+			err = matcher.Set(doc.Data, path, value)
+			if err != nil {
+				return err
+			}
+		}
 	}
 
-	// Use the query package to set the value
-	matcher := query.NewMatcher()
-	err = matcher.Set(doc.Data, path, value)
-	if err != nil {
-		return err
-	}
-
-	// Update the document
+	// Update or insert the document
 	_, err = s.collection.ReplaceOne(
 		ctx,
 		bson.M{"_id": s.documentID},
@@ -297,20 +301,26 @@ func (s *MongoStore) Delete(path string) error {
 		return err
 	}
 
-	// For non-root paths, we need to get the document first
+	// Otherwise, update the document by removing the value at the specified path
+	// First, get the current document
 	var doc Document
 	err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
-			return ErrPathNotFound
+			// Document doesn't exist, nothing to delete
+			return nil
 		}
 		return err
 	}
 
-	// Use the query package to delete the value
+	// Delete the value at the specified path
 	matcher := query.NewMatcher()
 	err = matcher.Delete(doc.Data, path)
 	if err != nil {
+		if err == query.ErrPathNotFound {
+			// Path doesn't exist, nothing to delete
+			return nil
+		}
 		return err
 	}
 
@@ -321,37 +331,58 @@ func (s *MongoStore) Delete(path string) error {
 
 // ToJSON serializes the entire store to JSON
 func (s *MongoStore) ToJSON() ([]byte, error) {
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	// Get the document
-	data, err := s.Get("")
+	var doc Document
+	err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
 	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			// If document doesn't exist, return an empty JSON object
+			return []byte("{}"), nil
+		}
 		return nil, err
 	}
 
-	return json.Marshal(data)
+	// Serialize the data to JSON
+	return json.Marshal(doc.Data)
 }
 
 // FindMatches finds all values matching a path expression
 func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
-	// Get the document
-	data, err := s.Get("")
-	if err != nil {
-		return nil, err
-	}
-
-	// Use the query package to find matches
-	matcher := query.NewMatcher()
-	return matcher.Match(data, path)
-}
-
-// Disconnect closes the MongoDB connection
-func (s *MongoStore) Disconnect() error {
-	// Cancel the context to stop the change stream
-	s.cancelFunc()
-
-	// Create a context with timeout for disconnection
+	// Create a context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Disconnect the client
+	// Get the document
+	var doc Document
+	err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			// If document doesn't exist, return an empty result
+			return []query.MatchResult{}, nil
+		}
+		return nil, err
+	}
+
+	// Create a matcher
+	matcher := query.NewMatcher()
+	
+	// Find matches
+	return matcher.Match(doc.Data, path)
+}
+
+// Disconnect closes the MongoDB connection when the store is no longer needed
+func (s *MongoStore) Disconnect() error {
+	// Cancel the background context
+	s.cancelFunc()
+	
+	// Create a context with timeout for disconnection
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
+	// Disconnect from MongoDB
 	return s.client.Disconnect(ctx)
 }

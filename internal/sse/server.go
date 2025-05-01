@@ -11,7 +11,7 @@ import (
 
 // Server manages SSE client connections and broadcasting
 type Server struct {
-	store          interface{}  // Generalized to work with any store implementation
+	store          store.Store  // Use the Store interface instead of interface{}
 	clients        map[string]*Client
 	clientsMutex   sync.RWMutex
 	maxClients     int
@@ -21,11 +21,11 @@ type Server struct {
 }
 
 // NewServer creates a new SSE server instance
-func NewServer(store interface{}) *Server {
+func NewServer(dataStore store.Store) *Server {
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 
 	s := &Server{
-		store:          store,
+		store:          dataStore,
 		clients:        make(map[string]*Client),
 		clientsMutex:   sync.RWMutex{},
 		maxClients:     10000, // Maximum number of clients
@@ -34,11 +34,15 @@ func NewServer(store interface{}) *Server {
 		cleanupCancel:  cleanupCancel,
 	}
 
-	// Register change listener for MongoDB store if applicable
-	if mongoStore, ok := store.(*store.MongoStore); ok {
-		mongoStore.SetChangeListener(func(path string, value interface{}) {
-			s.BroadcastEvent(path, value, "update")
-		})
+	// MongoDB specific operations need to be handled differently since MongoStore is custom type
+	// We can look for a specific interface method only available on MongoStore
+	if mongoStore, ok := dataStore.(*store.MongoStore); ok {
+		// If this is a MongoStore, register change listener
+		if setListener, ok := interface{}(mongoStore).(interface{ SetChangeListener(func(string, interface{})) }); ok {
+			setListener.SetChangeListener(func(path string, value interface{}) {
+				s.BroadcastEvent(path, value, "update")
+			})
+		}
 	}
 
 	// Start the cleanup goroutine
@@ -141,9 +145,12 @@ func (s *Server) Shutdown() {
 		delete(s.clients, id)
 	}
 
-	// Disconnect MongoDB store if applicable
+	// MongoDB specific shutdown
 	if mongoStore, ok := s.store.(*store.MongoStore); ok {
-		mongoStore.Disconnect()
+		// If this is a MongoStore, disconnect from MongoDB
+		if disconnect, ok := interface{}(mongoStore).(interface{ Disconnect() error }); ok {
+			disconnect.Disconnect()
+		}
 	}
 }
 

@@ -4,45 +4,44 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	
+	"github.com/piske-alex/go-sse/internal/query"
 )
 
-// ErrPathNotFound is returned when a path cannot be found in the store
-var ErrPathNotFound = errors.New("path not found in store")
-
-// Store represents an in-memory key-value store with concurrency safety
-type Store struct {
+// KVStore represents an in-memory key-value store with concurrency safety
+type KVStore struct {
 	data map[string]interface{}
 	mux  sync.RWMutex
 }
 
 // NewStore creates a new empty KV store
-func NewStore() *Store {
-	return &Store{
+func NewStore() *KVStore {
+	return &KVStore{
 		data: make(map[string]interface{}),
 	}
 }
 
 // Initialize sets the initial data for the store
-func (s *Store) Initialize(data map[string]interface{}) {
+func (s *KVStore) Initialize(data map[string]interface{}) error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 	s.data = data
+	return nil
 }
 
 // InitializeFromJSON initializes the store from a JSON byte array
-func (s *Store) InitializeFromJSON(jsonData []byte) error {
+func (s *KVStore) InitializeFromJSON(jsonData []byte) error {
 	var data map[string]interface{}
 	err := json.Unmarshal(jsonData, &data)
 	if err != nil {
 		return err
 	}
 
-	s.Initialize(data)
-	return nil
+	return s.Initialize(data)
 }
 
 // Get retrieves a value by path
-func (s *Store) Get(path string) (interface{}, error) {
+func (s *KVStore) Get(path string) (interface{}, error) {
 	s.mux.RLock()
 	defer s.mux.RUnlock()
 
@@ -61,7 +60,7 @@ func (s *Store) Get(path string) (interface{}, error) {
 }
 
 // Set updates a value at the given path
-func (s *Store) Set(path string, value interface{}) error {
+func (s *KVStore) Set(path string, value interface{}) error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
@@ -81,7 +80,7 @@ func (s *Store) Set(path string, value interface{}) error {
 }
 
 // SetFromJSON updates a value at the given path from JSON
-func (s *Store) SetFromJSON(path string, jsonData []byte) error {
+func (s *KVStore) SetFromJSON(path string, jsonData []byte) error {
 	var value interface{}
 	err := json.Unmarshal(jsonData, &value)
 	if err != nil {
@@ -92,7 +91,7 @@ func (s *Store) SetFromJSON(path string, jsonData []byte) error {
 }
 
 // Delete removes a value at the given path
-func (s *Store) Delete(path string) error {
+func (s *KVStore) Delete(path string) error {
 	s.mux.Lock()
 	defer s.mux.Unlock()
 
@@ -107,7 +106,7 @@ func (s *Store) Delete(path string) error {
 }
 
 // ToJSON serializes the entire store to JSON
-func (s *Store) ToJSON() ([]byte, error) {
+func (s *KVStore) ToJSON() ([]byte, error) {
 	s.mux.RLock()
 	defer s.mux.RUnlock()
 
@@ -115,22 +114,69 @@ func (s *Store) ToJSON() ([]byte, error) {
 }
 
 // getValueByPath navigates the map using the provided path and returns the value
-func (s *Store) getValueByPath(data map[string]interface{}, path string) (interface{}, error) {
-	// TODO: Implement path navigation based on the query package
-	// This is a placeholder until we implement the JQ-style path processor
-	return nil, errors.New("path navigation not implemented yet")
+func (s *KVStore) getValueByPath(data map[string]interface{}, path string) (interface{}, error) {
+	// Create a matcher
+	matcher := query.NewMatcher()
+	
+	// Get the value at the path
+	result, err := matcher.Get(data, path)
+	if err != nil {
+		if err == query.ErrPathNotFound {
+			return nil, ErrPathNotFound
+		}
+		return nil, err
+	}
+	
+	return result, nil
 }
 
 // setValueByPath updates a value at the specified path
-func (s *Store) setValueByPath(data map[string]interface{}, path string, value interface{}) error {
-	// TODO: Implement path navigation and update based on the query package
-	// This is a placeholder until we implement the JQ-style path processor
-	return errors.New("path navigation not implemented yet")
+func (s *KVStore) setValueByPath(data map[string]interface{}, path string, value interface{}) error {
+	// Create a matcher
+	matcher := query.NewMatcher()
+	
+	// Set the value at the path
+	err := matcher.Set(data, path, value)
+	if err != nil {
+		if err == query.ErrPathNotFound {
+			return ErrPathNotFound
+		}
+		return err
+	}
+	
+	return nil
 }
 
 // deleteByPath removes a value at the specified path
-func (s *Store) deleteByPath(data map[string]interface{}, path string) error {
-	// TODO: Implement path navigation and deletion based on the query package
-	// This is a placeholder until we implement the JQ-style path processor
-	return errors.New("path navigation not implemented yet")
+func (s *KVStore) deleteByPath(data map[string]interface{}, path string) error {
+	// Create a matcher
+	matcher := query.NewMatcher()
+	
+	// Delete the value at the path
+	err := matcher.Delete(data, path)
+	if err != nil {
+		if err == query.ErrPathNotFound {
+			return ErrPathNotFound
+		}
+		return err
+	}
+	
+	return nil
+}
+
+// FindMatches finds all values matching a path expression
+func (s *KVStore) FindMatches(path string) ([]query.MatchResult, error) {
+	s.mux.RLock()
+	defer s.mux.RUnlock()
+	
+	// Create a matcher
+	matcher := query.NewMatcher()
+	
+	// Find matches
+	results, err := matcher.Match(s.data, path)
+	if err != nil {
+		return nil, err
+	}
+	
+	return results, nil
 }
