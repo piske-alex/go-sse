@@ -2,9 +2,6 @@ package query
 
 import (
 	"errors"
-	"reflect"
-	"regexp"
-	"strings"
 )
 
 // ErrInvalidPath indicates an invalid path expression
