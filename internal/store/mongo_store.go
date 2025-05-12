@@ -417,6 +417,13 @@ func (s *MongoStore) DisplayStoreInfo() error {
 		return fmt.Errorf("failed to list databases: %w", err)
 	}
 
+	// Count total collections and documents across all databases
+	totalCollections := 0
+	totalDocuments := 0
+	dbCollectionMap := make(map[string][]string)
+	dbDocumentCountMap := make(map[string]int64)
+
+	// Loop through databases to gather statistics
 	log.Printf("Found %d databases:", len(databases))
 	for _, dbName := range databases {
 		db := s.client.Database(dbName)
@@ -427,12 +434,37 @@ func (s *MongoStore) DisplayStoreInfo() error {
 			log.Printf("  Database: %s (error listing collections: %v)", dbName, err)
 			continue
 		}
+
+		// Store collections for this database
+		dbCollectionMap[dbName] = collections
+		totalCollections += len(collections)
 		
 		log.Printf("  Database: %s (%d collections)", dbName, len(collections))
 		
+		// Count documents in each collection
+		var dbDocCount int64 = 0
+		for _, collName := range collections {
+			coll := db.Collection(collName)
+			
+			// Count documents
+			count, err := coll.CountDocuments(ctx, bson.M{})
+			if err != nil {
+				log.Printf("    Collection: %s (error counting documents: %v)", collName, err)
+				continue
+			}
+			
+			dbDocCount += count
+			totalDocuments += int(count)
+			
+			log.Printf("    Collection: %s (%d documents)", collName, count)
+		}
+		
+		// Store total document count for this database
+		dbDocumentCountMap[dbName] = dbDocCount
+		
 		// Only show detailed information for the db we're using
 		if dbName == s.database.Name() {
-			log.Printf("  > Current database: %s", dbName)
+			log.Printf("  > Current database: %s (total documents: %d)", dbName, dbDocCount)
 			
 			for _, collName := range collections {
 				coll := db.Collection(collName)
@@ -440,15 +472,12 @@ func (s *MongoStore) DisplayStoreInfo() error {
 				// Count documents
 				count, err := coll.CountDocuments(ctx, bson.M{})
 				if err != nil {
-					log.Printf("    Collection: %s (error counting documents: %v)", collName, err)
 					continue
 				}
 				
-				log.Printf("    Collection: %s (%d documents)", collName, count)
-				
 				// Only show details for our collection
 				if collName == s.collection.Name() {
-					log.Printf("    > Current collection: %s", collName)
+					log.Printf("    > Current collection: %s (%d documents)", collName, count)
 					
 					// List documents (limit to first 10)
 					cursor, err := coll.Find(ctx, bson.M{}, options.Find().SetLimit(10))
@@ -485,9 +514,60 @@ func (s *MongoStore) DisplayStoreInfo() error {
 					if count > 10 {
 						log.Printf("        ... and %d more documents", count-10)
 					}
+				} else {
+					// For other collections, show sample first document
+					if count > 0 {
+						cursor, err := coll.Find(ctx, bson.M{}, options.Find().SetLimit(1))
+						if err == nil {
+							defer cursor.Close(ctx)
+							var doc bson.M
+							if cursor.Next(ctx) {
+								if err := cursor.Decode(&doc); err == nil {
+									// Convert to JSON for display
+									jsonData, err := json.Marshal(doc)
+									if err == nil {
+										jsonStr := string(jsonData)
+										if len(jsonStr) > 200 {
+											jsonStr = jsonStr[:200] + "... (truncated)"
+										}
+										log.Printf("      Sample document: %s", jsonStr)
+									}
+								}
+							}
+						}
+					}
 				}
 			}
 		}
+	}
+	
+	// Print collection statistics summary
+	log.Println("\n===== MongoDB Statistics Summary =====")
+	log.Printf("Total Databases: %d", len(databases))
+	log.Printf("Total Collections: %d", totalCollections)
+	log.Printf("Total Documents: %d", totalDocuments)
+	log.Printf("Current Database: %s", s.database.Name())
+	log.Printf("Current Collection: %s", s.collection.Name())
+	
+	// Get our specific document if it exists
+	var doc Document
+	err = s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
+	if err == nil {
+		// Get the size of the data
+		jsonData, err := json.Marshal(doc.Data)
+		if err == nil {
+			dataSizeKB := float64(len(jsonData)) / 1024.0
+			log.Printf("Current Document (ID: %s) Size: %.2f KB", s.documentID, dataSizeKB)
+			
+			// Count top-level keys
+			if doc.Data != nil {
+				log.Printf("Current Document Top-level Keys: %d", len(doc.Data))
+			}
+		}
+	} else if err == mongo.ErrNoDocuments {
+		log.Printf("Current Document (ID: %s) does not exist yet", s.documentID)
+	} else {
+		log.Printf("Error retrieving current document: %v", err)
 	}
 	
 	log.Println("================================")

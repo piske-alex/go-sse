@@ -193,6 +193,8 @@ func (s *KVStore) DisplayStoreInfo() error {
 	// Check if store is empty
 	if len(s.data) == 0 {
 		log.Println("Store is empty")
+		log.Println("Collections: 0")
+		log.Println("Documents: 0")
 		log.Println("=====================================")
 		return nil
 	}
@@ -207,27 +209,96 @@ func (s *KVStore) DisplayStoreInfo() error {
 	// Get the size of the data
 	dataSizeKB := float64(len(jsonData)) / 1024.0
 	
+	// Count collections (top-level maps) and documents (entries in those maps)
+	collections := 0
+	documents := 0
+	collectionDetails := make(map[string]int)
+
 	// Show stats about the store
 	log.Printf("Store size: %.2f KB", dataSizeKB)
 	log.Printf("Top-level keys: %d", len(s.data))
 	
-	// List all top-level keys
+	// List all top-level keys and identify collections
 	log.Println("Top-level structure:")
 	for key, value := range s.data {
-		// For map values, show the number of entries
+		// For map values, consider them as collections
 		if mapValue, ok := value.(map[string]interface{}); ok {
-			log.Printf("  %s: map with %d entries", key, len(mapValue))
+			collections++
+			numDocs := len(mapValue)
+			documents += numDocs
+			collectionDetails[key] = numDocs
+			log.Printf("  %s: collection with %d documents", key, numDocs)
+			
+			// Sample documents in this collection
+			if numDocs > 0 {
+				i := 0
+				for docKey, docValue := range mapValue {
+					if i >= 3 { // Only show first 3 documents
+						log.Printf("    ... and %d more documents", numDocs-3)
+						break
+					}
+					
+					// Convert document to JSON for display
+					docJson, err := json.Marshal(docValue)
+					if err != nil {
+						log.Printf("    %s: [error marshaling]", docKey)
+					} else {
+						docStr := string(docJson)
+						if len(docStr) > 100 {
+							docStr = docStr[:100] + "... (truncated)"
+						}
+						log.Printf("    %s: %s", docKey, docStr)
+					}
+					i++
+				}
+			}
 		} else if sliceValue, ok := value.([]interface{}); ok {
-			// For slice values, show the length
-			log.Printf("  %s: array with %d elements", key, len(sliceValue))
+			// For slice values, consider them as collections of documents
+			collections++
+			numDocs := len(sliceValue)
+			documents += numDocs
+			collectionDetails[key] = numDocs
+			log.Printf("  %s: array collection with %d documents", key, numDocs)
+			
+			// Sample documents in this collection
+			if numDocs > 0 {
+				for i := 0; i < min(3, numDocs); i++ { // Only show first 3 elements
+					// Convert document to JSON for display
+					docJson, err := json.Marshal(sliceValue[i])
+					if err != nil {
+						log.Printf("    [%d]: [error marshaling]", i)
+					} else {
+						docStr := string(docJson)
+						if len(docStr) > 100 {
+							docStr = docStr[:100] + "... (truncated)"
+						}
+						log.Printf("    [%d]: %s", i, docStr)
+					}
+				}
+				if numDocs > 3 {
+					log.Printf("    ... and %d more documents", numDocs-3)
+				}
+			}
 		} else {
-			// For other values, show the type
-			log.Printf("  %s: %T", key, value)
+			// For other values, show the type (these are not collections)
+			log.Printf("  %s: %T value", key, value)
+		}
+	}
+	
+	// Show collection summary
+	log.Printf("Collections found: %d", collections)
+	log.Printf("Total documents: %d", documents)
+	log.Println("Collection details:")
+	if len(collectionDetails) == 0 {
+		log.Println("  No collections found")
+	} else {
+		for coll, count := range collectionDetails {
+			log.Printf("  %s: %d documents", coll, count)
 		}
 	}
 	
 	// Show the full data if it's not too large
-	if dataSizeKB < 50 {
+	if dataSizeKB < 25 {
 		log.Println("Full store contents:")
 		log.Println(string(jsonData))
 	} else {
@@ -246,4 +317,12 @@ func (s *KVStore) DisplayStoreInfo() error {
 	
 	log.Println("=====================================")
 	return nil
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
