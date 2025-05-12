@@ -130,17 +130,17 @@ func CreateStore(storeType StoreType) (Store, error) {
 
 		dbName := os.Getenv("MONGO_DB_NAME")
 		if dbName == "" {
-			dbName = "gosse"
+			dbName = "test"
 		}
 
 		collectionName := os.Getenv("MONGO_COLLECTION")
 		if collectionName == "" {
-			collectionName = "kv_store"
+			collectionName = "sse"
 		}
 
 		documentID := os.Getenv("MONGO_DOCUMENT_ID")
 		if documentID == "" {
-			documentID = "main"
+			documentID = "latest"
 		}
 
 		return NewMongoStore(uri, dbName, collectionName, documentID)
