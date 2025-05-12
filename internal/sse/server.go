@@ -2,6 +2,7 @@ package sse
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -52,7 +53,7 @@ func NewServer(dataStore store.Store) *Server {
 }
 
 // AddClient adds a new client connection
-func (s *Server) AddClient(w http.ResponseWriter, r *http.Request, filterExprs []string) (*Client, error) {
+func (s *Server) AddClient(w http.ResponseWriter, r *http.Request, filterExprs []string, sendInitialData bool) (*Client, error) {
 	// Check if we've reached max clients
 	s.clientsMutex.RLock()
 	if len(s.clients) >= s.maxClients {
@@ -83,6 +84,87 @@ func (s *Server) AddClient(w http.ResponseWriter, r *http.Request, filterExprs [
 
 	// Send initial connection event
 	client.Send("connected", map[string]string{"id": client.ID})
+
+	// If sendInitialData is false, skip sending the initial data
+	if !sendInitialData {
+		log.Printf("Skipping initial data for client %s as requested", client.ID)
+		return client, nil
+	}
+
+	// Small delay to ensure connection event is processed first
+	time.Sleep(50 * time.Millisecond)
+
+	// Send initial store data to the client
+	// Try to respect filters if they exist
+	if len(client.Filters) > 0 {
+		// Get the root data first
+		rootData, err := s.store.Get(".")
+		if err != nil {
+			log.Printf("Error fetching initial data for client %s: %v", client.ID, err)
+		} else if rootData != nil {
+			// Create a map to deduplicate filtered data
+			sent := make(map[string]bool)
+			
+			// For each filter, try to find matching data
+			for _, filter := range client.Filters {
+				// Simple case: if filter is "." or empty, send all data
+				if filter.Path == "." || filter.Path == "" {
+					eventData := map[string]interface{}{
+						"path":  ".",
+						"value": rootData,
+						"time":  time.Now().UnixNano() / int64(time.Millisecond),
+					}
+					client.Send("initial_data", eventData)
+					sent["."] = true
+					continue
+				}
+				
+				// Try to get data for the specific filter path
+				data, err := s.store.Get(filter.Path)
+				if err != nil {
+					// If direct path doesn't work, try pattern matching
+					matches, err := s.store.FindMatches(filter.Path) 
+					if err == nil && len(matches) > 0 {
+						// Send each match that hasn't been sent yet
+						for _, match := range matches {
+							if !sent[match.Path] {
+								eventData := map[string]interface{}{
+									"path":  match.Path,
+									"value": match.Value,
+									"time":  time.Now().UnixNano() / int64(time.Millisecond),
+								}
+								client.Send("initial_data", eventData)
+								sent[match.Path] = true
+							}
+						}
+					}
+				} else if data != nil && !sent[filter.Path] {
+					// Send the data for this filter
+					eventData := map[string]interface{}{
+						"path":  filter.Path,
+						"value": data,
+						"time":  time.Now().UnixNano() / int64(time.Millisecond),
+					}
+					client.Send("initial_data", eventData)
+					sent[filter.Path] = true
+				}
+			}
+		}
+	} else {
+		// No specific filters, just send the root data
+		initialData, err := s.store.Get(".")
+		if err == nil && initialData != nil {
+			eventData := map[string]interface{}{
+				"path":  ".",
+				"value": initialData,
+				"time":  time.Now().UnixNano() / int64(time.Millisecond),
+			}
+			client.Send("initial_data", eventData)
+		} else {
+			// Log error but don't fail the connection
+			log.Printf("Error fetching initial data for client %s: %v", client.ID, err)
+		}
+	}
 
 	return client, nil
 }

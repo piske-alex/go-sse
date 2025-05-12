@@ -77,15 +77,22 @@ func (h *Handler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse filter query parameter
+	// Parse filter query parameter (comma-separated list of JQ-style filters)
 	filters := []string{}
 	filterParam := r.URL.Query().Get("filter")
 	if filterParam != "" {
 		filters = strings.Split(filterParam, ",")
 	}
 
+	// Parse initial_data parameter (optional, default is true)
+	sendInitialData := true
+	initialDataParam := r.URL.Query().Get("initial_data")
+	if initialDataParam == "false" {
+		sendInitialData = false
+	}
+
 	// Add client to SSE server
-	client, err := h.SSEServer.AddClient(w, r, filters)
+	client, err := h.SSEServer.AddClient(w, r, filters, sendInitialData)
 	if err != nil {
 		log.Printf("Error adding SSE client: %v", err)
 		sendJSONError(w, http.StatusInternalServerError, "sse_connection_failed", fmt.Sprintf("Failed to establish SSE connection: %v", err))
@@ -93,7 +100,7 @@ func (h *Handler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log client connection
-	log.Printf("SSE client connected: %s with filters: %v", client.ID, filters)
+	log.Printf("SSE client connected: %s with filters: %v, initial data: %v", client.ID, filters, sendInitialData)
 
 	// Keep the connection open until client disconnects
 	<-r.Context().Done()
