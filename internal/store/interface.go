@@ -34,4 +34,7 @@ type Store interface {
 
 	// FindMatches finds all values matching a path expression
 	FindMatches(path string) ([]query.MatchResult, error)
+	
+	// DisplayStoreInfo displays information about the store contents
+	DisplayStoreInfo() error
 }

@@ -3,6 +3,8 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"log"
+	"strings"
 	"sync"
 	
 	"github.com/piske-alex/go-sse/internal/query"
@@ -179,4 +181,69 @@ func (s *KVStore) FindMatches(path string) ([]query.MatchResult, error) {
 	}
 	
 	return results, nil
+}
+
+// DisplayStoreInfo displays the contents of the in-memory store
+func (s *KVStore) DisplayStoreInfo() error {
+	s.mux.RLock()
+	defer s.mux.RUnlock()
+	
+	log.Println("====== In-Memory Store Information ======")
+	
+	// Check if store is empty
+	if len(s.data) == 0 {
+		log.Println("Store is empty")
+		log.Println("=====================================")
+		return nil
+	}
+	
+	// Convert data to JSON for nice display
+	jsonData, err := json.MarshalIndent(s.data, "", "  ")
+	if err != nil {
+		log.Printf("Error marshaling store data: %v", err)
+		return err
+	}
+	
+	// Get the size of the data
+	dataSizeKB := float64(len(jsonData)) / 1024.0
+	
+	// Show stats about the store
+	log.Printf("Store size: %.2f KB", dataSizeKB)
+	log.Printf("Top-level keys: %d", len(s.data))
+	
+	// List all top-level keys
+	log.Println("Top-level structure:")
+	for key, value := range s.data {
+		// For map values, show the number of entries
+		if mapValue, ok := value.(map[string]interface{}); ok {
+			log.Printf("  %s: map with %d entries", key, len(mapValue))
+		} else if sliceValue, ok := value.([]interface{}); ok {
+			// For slice values, show the length
+			log.Printf("  %s: array with %d elements", key, len(sliceValue))
+		} else {
+			// For other values, show the type
+			log.Printf("  %s: %T", key, value)
+		}
+	}
+	
+	// Show the full data if it's not too large
+	if dataSizeKB < 50 {
+		log.Println("Full store contents:")
+		log.Println(string(jsonData))
+	} else {
+		log.Printf("Store contents too large to display (%.2f KB). Showing sample:", dataSizeKB)
+		// Sample the first 20 lines of the JSON
+		lines := strings.Split(string(jsonData), "\n")
+		sampleSize := 20
+		if len(lines) < sampleSize {
+			sampleSize = len(lines)
+		}
+		for i := 0; i < sampleSize; i++ {
+			log.Println(lines[i])
+		}
+		log.Printf("... (truncated, %.2f KB total)", dataSizeKB)
+	}
+	
+	log.Println("=====================================")
+	return nil
 }

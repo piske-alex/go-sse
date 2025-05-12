@@ -56,6 +56,12 @@ func main() {
 		log.Fatalf("Failed to create store: %v", err)
 	}
 
+	// Display store/database information at startup
+	log.Println("Displaying initial store/database information")
+	if err := kvStore.DisplayStoreInfo(); err != nil {
+		log.Printf("Warning: Failed to display store information: %v", err)
+	}
+
 	// Create components
 	sseServer := sse.NewServer(kvStore)
 	apiHandler := api.NewHandler(kvStore, sseServer)

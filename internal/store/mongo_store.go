@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -385,4 +386,110 @@ func (s *MongoStore) Disconnect() error {
 	
 	// Disconnect from MongoDB
 	return s.client.Disconnect(ctx)
+}
+
+// DisplayStoreInfo lists all databases, collections, and documents at startup for debugging
+func (s *MongoStore) DisplayStoreInfo() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Display connected MongoDB server info
+	serverStatus, err := s.database.RunCommand(ctx, bson.D{{"serverStatus", 1}}).DecodeBytes()
+	if err != nil {
+		log.Printf("Error getting server status: %v", err)
+	} else {
+		version, err := serverStatus.LookupErr("version")
+		if err == nil {
+			log.Printf("Connected to MongoDB server version: %s", version.StringValue())
+		}
+		
+		host, err := serverStatus.LookupErr("host")
+		if err == nil {
+			log.Printf("MongoDB server host: %s", host.StringValue())
+		}
+	}
+
+	log.Println("====== MongoDB Information ======")
+
+	// List databases
+	databases, err := s.client.ListDatabaseNames(ctx, bson.M{})
+	if err != nil {
+		return fmt.Errorf("failed to list databases: %w", err)
+	}
+
+	log.Printf("Found %d databases:", len(databases))
+	for _, dbName := range databases {
+		db := s.client.Database(dbName)
+		
+		// List collections in this database
+		collections, err := db.ListCollectionNames(ctx, bson.M{})
+		if err != nil {
+			log.Printf("  Database: %s (error listing collections: %v)", dbName, err)
+			continue
+		}
+		
+		log.Printf("  Database: %s (%d collections)", dbName, len(collections))
+		
+		// Only show detailed information for the db we're using
+		if dbName == s.database.Name() {
+			log.Printf("  > Current database: %s", dbName)
+			
+			for _, collName := range collections {
+				coll := db.Collection(collName)
+				
+				// Count documents
+				count, err := coll.CountDocuments(ctx, bson.M{})
+				if err != nil {
+					log.Printf("    Collection: %s (error counting documents: %v)", collName, err)
+					continue
+				}
+				
+				log.Printf("    Collection: %s (%d documents)", collName, count)
+				
+				// Only show details for our collection
+				if collName == s.collection.Name() {
+					log.Printf("    > Current collection: %s", collName)
+					
+					// List documents (limit to first 10)
+					cursor, err := coll.Find(ctx, bson.M{}, options.Find().SetLimit(10))
+					if err != nil {
+						log.Printf("      Error listing documents: %v", err)
+						continue
+					}
+					defer cursor.Close(ctx)
+					
+					var documents []Document
+					if err := cursor.All(ctx, &documents); err != nil {
+						log.Printf("      Error decoding documents: %v", err)
+						continue
+					}
+					
+					log.Printf("      Documents in %s (showing up to 10):", collName)
+					for i, doc := range documents {
+						// Convert document data to JSON for display
+						jsonData, err := json.MarshalIndent(doc, "        ", "  ")
+						if err != nil {
+							log.Printf("        Document %d (ID: %s) (error marshaling: %v)", i+1, doc.ID, err)
+							continue
+						}
+						
+						jsonStr := string(jsonData)
+						// Truncate if too long
+						if len(jsonStr) > 500 {
+							jsonStr = jsonStr[:500] + "... (truncated)"
+						}
+						
+						log.Printf("        Document %d (ID: %s): %s", i+1, doc.ID, jsonStr)
+					}
+					
+					if count > 10 {
+						log.Printf("        ... and %d more documents", count-10)
+					}
+				}
+			}
+		}
+	}
+	
+	log.Println("================================")
+	return nil
 }
