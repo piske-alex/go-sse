@@ -138,9 +138,20 @@ func CreateStore(storeType StoreType) (Store, error) {
 			collectionName = "sse"
 		}
 
+		// Check for the MONGO_USE_COLLECTION_ROOT environment variable
+		// If it's set to "true", we'll use the collection as the root instead of a document
+		useCollectionRoot := os.Getenv("MONGO_USE_COLLECTION_ROOT")
 		documentID := os.Getenv("MONGO_DOCUMENT_ID")
-		if documentID == "" {
-			documentID = "latest"
+
+		// Empty documentID or "collection" means use collection as root
+		if useCollectionRoot == "true" || useCollectionRoot == "1" {
+			log.Println("Using MongoDB collection as root path (collection-based document store)")
+			documentID = "collection" // Special value to trigger collection mode
+		} else if documentID == "" {
+			documentID = "latest" // Default document ID
+			log.Println("Using document-based MongoDB store with document ID:", documentID)
+		} else {
+			log.Println("Using document-based MongoDB store with document ID:", documentID)
 		}
 
 		return NewMongoStore(uri, dbName, collectionName, documentID)

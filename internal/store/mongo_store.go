@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/piske-alex/go-sse/internal/query"
@@ -26,7 +27,8 @@ type MongoStore struct {
 	client         *mongo.Client
 	database       *mongo.Database
 	collection     *mongo.Collection
-	documentID     string
+	documentID     string    // This can be empty when using collection as root
+	useCollection  bool      // When true, collection is root path and documentID is ignored
 	context        context.Context
 	cancelFunc     context.CancelFunc
 	changeListener func(path string, value interface{})
@@ -55,34 +57,68 @@ func NewMongoStore(uri, dbName, collectionName, documentID string) (*MongoStore,
 	// Create a background context for the store
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 
+	// Determine if we're using collection as root based on documentID
+	useCollection := documentID == "" || documentID == "collection"
+
 	// Create the store
 	store := &MongoStore{
-		client:     client,
-		database:   client.Database(dbName),
-		collection: client.Database(dbName).Collection(collectionName),
-		documentID: documentID,
-		context:    bgCtx,
-		cancelFunc: bgCancel,
+		client:        client,
+		database:      client.Database(dbName),
+		collection:    client.Database(dbName).Collection(collectionName),
+		documentID:    documentID,
+		useCollection: useCollection,
+		context:       bgCtx,
+		cancelFunc:    bgCancel,
 	}
 
-	// Set up the change stream listener
-	go store.setupChangeStream()
+	// Log the mode we're running in
+	if useCollection {
+		log.Printf("MongoDB store initialized with collection '%s' as root path", collectionName)
+	} else {
+		log.Printf("MongoDB store initialized with document ID '%s' as root path", documentID)
+	}
+
+	// Set up the change stream listener (only for document mode)
+	if !useCollection {
+		go store.setupChangeStream()
+	}
 
 	return store, nil
 }
 
 // setupChangeStream creates a MongoDB change stream to listen for updates
 func (s *MongoStore) setupChangeStream() {
-	// Create a pipeline that filters for updates to our document
-	pipeline := mongo.Pipeline{
-		bson.D{
-			{"$match", bson.D{
-				{"operationType", bson.D{
-					{"$in", bson.A{"update", "replace", "insert"}},
+	// Skip if no change listener is set
+	if s.changeListener == nil {
+		return
+	}
+
+	// Create a pipeline that filters for document changes
+	var pipeline mongo.Pipeline
+	
+	if s.useCollection {
+		// In collection mode, watch all document changes in the collection
+		pipeline = mongo.Pipeline{
+			bson.D{
+				{"$match", bson.D{
+					{"operationType", bson.D{
+						{"$in", bson.A{"update", "replace", "insert", "delete"}},
+					}},
 				}},
-				{"documentKey._id", s.documentID},
-			}},
-		},
+			},
+		}
+	} else {
+		// In document mode, watch only our specific document
+		pipeline = mongo.Pipeline{
+			bson.D{
+				{"$match", bson.D{
+					{"operationType", bson.D{
+						{"$in", bson.A{"update", "replace", "insert"}},
+					}},
+					{"documentKey._id", s.documentID},
+				}},
+			},
+		}
 	}
 
 	// Create options with full document return
@@ -96,6 +132,9 @@ func (s *MongoStore) setupChangeStream() {
 	}
 	defer changeStream.Close(s.context)
 
+	log.Printf("MongoDB change stream set up for %s mode", 
+		map[bool]string{true: "collection", false: "document"}[s.useCollection])
+
 	// Process change events
 	for changeStream.Next(s.context) {
 		// Decode the change event
@@ -105,32 +144,69 @@ func (s *MongoStore) setupChangeStream() {
 			continue
 		}
 
-		// Extract the full document
-		fullDocument, ok := changeEvent["fullDocument"].(bson.M)
-		if !ok {
-			continue
-		}
+		// Handle changes based on store mode
+		if s.useCollection {
+			// Collection mode - get document ID and report change for that document
+			operationType, _ := changeEvent["operationType"].(string)
+			
+			// Get the document ID
+			var docID string
+			if documentKey, ok := changeEvent["documentKey"].(bson.M); ok {
+				if id, ok := documentKey["_id"]; ok {
+					docID = fmt.Sprintf("%v", id)
+				}
+			}
+			
+			if docID == "" {
+				continue // Skip if no document ID
+			}
+			
+			if operationType == "delete" {
+				// For delete operations, notify with null value
+				if s.changeListener != nil {
+					s.changeListener(docID, nil)
+				}
+				continue
+			}
+			
+			// For other operations, get the full document
+			fullDocument, ok := changeEvent["fullDocument"].(bson.M)
+			if !ok {
+				continue
+			}
+			
+			// Notify with the full document
+			if s.changeListener != nil {
+				s.changeListener(docID, fullDocument)
+			}
+		} else {
+			// Document mode - extract data field from our document
+			fullDocument, ok := changeEvent["fullDocument"].(bson.M)
+			if !ok {
+				continue
+			}
 
-		// Extract the data field
-		data, ok := fullDocument["data"].(bson.M)
-		if !ok {
-			continue
-		}
+			// Extract the data field
+			data, ok := fullDocument["data"].(bson.M)
+			if !ok {
+				continue
+			}
 
-		// Convert to map[string]interface{}
-		jsonData, err := json.Marshal(data)
-		if err != nil {
-			continue
-		}
+			// Convert to map[string]interface{}
+			jsonData, err := json.Marshal(data)
+			if err != nil {
+				continue
+			}
 
-		var dataMap map[string]interface{}
-		if err := json.Unmarshal(jsonData, &dataMap); err != nil {
-			continue
-		}
+			var dataMap map[string]interface{}
+			if err := json.Unmarshal(jsonData, &dataMap); err != nil {
+				continue
+			}
 
-		// If we have a change listener, notify it with the root path
-		if s.changeListener != nil {
-			s.changeListener(".", dataMap)
+			// Notify the change listener
+			if s.changeListener != nil {
+				s.changeListener(".", dataMap)
+			}
 		}
 	}
 
@@ -184,32 +260,130 @@ func (s *MongoStore) Get(path string) (interface{}, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Get the document
-	var doc Document
-	err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return nil, ErrPathNotFound
+	// Different handling based on mode
+	if s.useCollection {
+		// In collection mode, use MongoDB query directly
+		
+		// If path is empty or ".", return all documents in collection
+		if path == "" || path == "." {
+			cursor, err := s.collection.Find(ctx, bson.M{})
+			if err != nil {
+				return nil, err
+			}
+			defer cursor.Close(ctx)
+			
+			var results []bson.M
+			if err := cursor.All(ctx, &results); err != nil {
+				return nil, err
+			}
+			
+			// Convert to map with ID as key for better compatibility
+			resultMap := make(map[string]interface{})
+			for _, doc := range results {
+				if id, ok := doc["_id"]; ok {
+					// Convert _id to string for consistent usage
+					idStr := fmt.Sprintf("%v", id)
+					resultMap[idStr] = doc
+				}
+			}
+			
+			return resultMap, nil
 		}
-		return nil, err
-	}
-
-	// If path is empty or ".", return the entire data
-	if path == "" || path == "." {
-		return doc.Data, nil
-	}
-
-	// Parse the path and navigate the data
-	matcher := query.NewMatcher()
-	result, err := matcher.Get(doc.Data, path)
-	if err != nil {
-		if err == query.ErrPathNotFound {
-			return nil, ErrPathNotFound
+		
+		// Check if path refers to a specific document ID
+		// Try simple ID lookup first (root document names)
+		var doc bson.M
+		err := s.collection.FindOne(ctx, bson.M{"_id": path}).Decode(&doc)
+		if err == nil {
+			return doc, nil
 		}
-		return nil, err
-	}
+		
+		// If not direct ID, try to parse the path for nested document access
+		parts := strings.Split(path, ".")
+		if len(parts) > 0 {
+			// First part might be document ID, rest is path within document
+			docID := parts[0]
+			var doc bson.M
+			err := s.collection.FindOne(ctx, bson.M{"_id": docID}).Decode(&doc)
+			if err == nil {
+				// If only document ID, return whole document
+				if len(parts) == 1 {
+					return doc, nil
+				}
+				
+				// Otherwise, navigate nested path
+				subPath := strings.Join(parts[1:], ".")
+				matcher := query.NewMatcher()
+				result, err := matcher.Get(doc, subPath)
+				if err != nil {
+					if err == query.ErrPathNotFound {
+						return nil, ErrPathNotFound
+					}
+					return nil, err
+				}
+				return result, nil
+			}
+			
+			// If docID lookup failed, try query with path as filter
+			filter := bson.M{}
+			// Try standard MongoDB dot notation query
+			cursor, err := s.collection.Find(ctx, filter)
+			if err != nil {
+				return nil, err
+			}
+			defer cursor.Close(ctx)
+			
+			var results []bson.M
+			if err := cursor.All(ctx, &results); err != nil {
+				return nil, err
+			}
+			
+			if len(results) == 0 {
+				return nil, ErrPathNotFound
+			}
+			
+			// For collection paths, always return as a map by ID
+			resultMap := make(map[string]interface{})
+			for _, doc := range results {
+				if id, ok := doc["_id"]; ok {
+					idStr := fmt.Sprintf("%v", id)
+					resultMap[idStr] = doc
+				}
+			}
+			
+			return resultMap, nil
+		}
+		
+		return nil, ErrPathNotFound
+	} else {
+		// Document mode - original implementation
+		// Get the document
+		var doc Document
+		err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
+		if err != nil {
+			if err == mongo.ErrNoDocuments {
+				return nil, ErrPathNotFound
+			}
+			return nil, err
+		}
 
-	return result, nil
+		// If path is empty or ".", return the entire data
+		if path == "" || path == "." {
+			return doc.Data, nil
+		}
+
+		// Parse the path and navigate the data
+		matcher := query.NewMatcher()
+		result, err := matcher.Get(doc.Data, path)
+		if err != nil {
+			if err == query.ErrPathNotFound {
+				return nil, ErrPathNotFound
+			}
+			return nil, err
+		}
+
+		return result, nil
+	}
 }
 
 // Set updates a value at the given path
@@ -218,65 +392,177 @@ func (s *MongoStore) Set(path string, value interface{}) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// First, get the document
-	var doc Document
-	err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			// Document doesn't exist, create a new one
+	// Different handling based on mode
+	if s.useCollection {
+		// In collection mode
+		
+		// If path is empty or ".", replace the entire collection
+		if path == "" || path == "." {
+			// For safety, require a map for replacing collection
+			docs, ok := value.(map[string]interface{})
+			if !ok {
+				return errors.New("value must be a map of documents when setting collection root")
+			}
+			
+			// Collection replacement is a multi-step operation
+			// 1. Delete all existing documents
+			_, err := s.collection.DeleteMany(ctx, bson.M{})
+			if err != nil {
+				return err
+			}
+			
+			// 2. Insert all new documents
+			for key, val := range docs {
+				// Make sure each document has an _id field
+				docMap, ok := val.(map[string]interface{})
+				if !ok {
+					// If not a map, wrap it in a document with the key as ID
+					docMap = map[string]interface{}{
+						"_id":   key,
+						"value": val,
+					}
+				} else {
+					// If already a map, ensure it has _id
+					if _, hasID := docMap["_id"]; !hasID {
+						docMap["_id"] = key
+					}
+				}
+				
+				// Insert the document
+				_, err := s.collection.InsertOne(ctx, docMap)
+				if err != nil {
+					return err
+				}
+			}
+			
+			return nil
+		}
+		
+		// Check if path refers to a document (no dot)
+		if !strings.Contains(path, ".") {
+			// Path is document ID
+			docMap, ok := value.(map[string]interface{})
+			if !ok {
+				// Wrap non-map values
+				docMap = map[string]interface{}{
+					"_id":   path, 
+					"value": value,
+				}
+			} else {
+				// Ensure document has _id field
+				docMap["_id"] = path
+			}
+			
+			// Upsert the document
+			_, err := s.collection.ReplaceOne(
+				ctx,
+				bson.M{"_id": path},
+				docMap,
+				options.Replace().SetUpsert(true),
+			)
+			return err
+		}
+		
+		// Handle dot notation - document.field.subfield
+		parts := strings.Split(path, ".")
+		if len(parts) > 1 {
+			docID := parts[0]
+			subPath := strings.Join(parts[1:], ".")
+			
+			// Get current document
+			var doc bson.M
+			err := s.collection.FindOne(ctx, bson.M{"_id": docID}).Decode(&doc)
+			if err != nil {
+				if err == mongo.ErrNoDocuments {
+					// Create new document with this path
+					newDoc := bson.M{"_id": docID}
+					
+					// Create nested structure following the path
+					current := newDoc
+					for _, part := range parts[1:len(parts)-1] {
+						current[part] = bson.M{}
+						current = current[part].(bson.M)
+					}
+					
+					// Set the value at the final path
+					current[parts[len(parts)-1]] = value
+					
+					// Insert the document
+					_, err := s.collection.InsertOne(ctx, newDoc)
+					return err
+				}
+				return err
+			}
+			
+			// Document exists, update field
+			updateDoc := bson.M{"$set": bson.M{subPath: value}}
+			_, err = s.collection.UpdateOne(ctx, bson.M{"_id": docID}, updateDoc)
+			return err
+		}
+		
+		return errors.New("invalid path format")
+	} else {
+		// Document mode - original implementation
+		// First, get the document
+		var doc Document
+		err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
+		if err != nil {
+			if err == mongo.ErrNoDocuments {
+				// Document doesn't exist, create a new one
+				if path == "" || path == "." {
+					// If path is root, simply store the value as is (if it's a map)
+					valueMap, ok := value.(map[string]interface{})
+					if !ok {
+						return errors.New("value must be a map when setting root")
+					}
+					doc = Document{
+						ID:   s.documentID,
+						Data: valueMap,
+					}
+				} else {
+					// Otherwise, create an empty map and set the value at the path
+					doc = Document{
+						ID:   s.documentID,
+						Data: make(map[string]interface{}),
+					}
+					matcher := query.NewMatcher()
+					err = matcher.Set(doc.Data, path, value)
+					if err != nil {
+						return err
+					}
+				}
+			} else {
+				return err
+			}
+		} else {
+			// Document exists, update it at the specified path
 			if path == "" || path == "." {
-				// If path is root, simply store the value as is (if it's a map)
+				// If path is root, simply replace the entire data (if it's a map)
 				valueMap, ok := value.(map[string]interface{})
 				if !ok {
 					return errors.New("value must be a map when setting root")
 				}
-				doc = Document{
-					ID:   s.documentID,
-					Data: valueMap,
-				}
+				doc.Data = valueMap
 			} else {
-				// Otherwise, create an empty map and set the value at the path
-				doc = Document{
-					ID:   s.documentID,
-					Data: make(map[string]interface{}),
-				}
+				// Otherwise, set the value at the specified path
 				matcher := query.NewMatcher()
 				err = matcher.Set(doc.Data, path, value)
 				if err != nil {
 					return err
 				}
 			}
-		} else {
-			return err
 		}
-	} else {
-		// Document exists, update it at the specified path
-		if path == "" || path == "." {
-			// If path is root, simply replace the entire data (if it's a map)
-			valueMap, ok := value.(map[string]interface{})
-			if !ok {
-				return errors.New("value must be a map when setting root")
-			}
-			doc.Data = valueMap
-		} else {
-			// Otherwise, set the value at the specified path
-			matcher := query.NewMatcher()
-			err = matcher.Set(doc.Data, path, value)
-			if err != nil {
-				return err
-			}
-		}
+
+		// Update or insert the document
+		_, err = s.collection.ReplaceOne(
+			ctx,
+			bson.M{"_id": s.documentID},
+			doc,
+			options.Replace().SetUpsert(true),
+		)
+
+		return err
 	}
-
-	// Update or insert the document
-	_, err = s.collection.ReplaceOne(
-		ctx,
-		bson.M{"_id": s.documentID},
-		doc,
-		options.Replace().SetUpsert(true),
-	)
-
-	return err
 }
 
 // SetFromJSON updates a value at the given path from JSON
@@ -296,38 +582,71 @@ func (s *MongoStore) Delete(path string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// If path is empty or ".", delete the entire document
-	if path == "" || path == "." {
-		_, err := s.collection.DeleteOne(ctx, bson.M{"_id": s.documentID})
-		return err
-	}
-
-	// Otherwise, update the document by removing the value at the specified path
-	// First, get the current document
-	var doc Document
-	err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			// Document doesn't exist, nothing to delete
-			return nil
+	// Different handling based on mode
+	if s.useCollection {
+		// In collection mode
+		
+		// If path is empty or ".", delete all documents
+		if path == "" || path == "." {
+			_, err := s.collection.DeleteMany(ctx, bson.M{})
+			return err
 		}
-		return err
-	}
-
-	// Delete the value at the specified path
-	matcher := query.NewMatcher()
-	err = matcher.Delete(doc.Data, path)
-	if err != nil {
-		if err == query.ErrPathNotFound {
-			// Path doesn't exist, nothing to delete
-			return nil
+		
+		// Check if path refers to a document (no dot)
+		if !strings.Contains(path, ".") {
+			// Delete document by ID
+			_, err := s.collection.DeleteOne(ctx, bson.M{"_id": path})
+			return err
 		}
+		
+		// Handle dot notation - document.field.subfield
+		parts := strings.Split(path, ".")
+		if len(parts) > 1 {
+			docID := parts[0]
+			subPath := strings.Join(parts[1:], ".")
+			
+			// Unset the field
+			updateDoc := bson.M{"$unset": bson.M{subPath: ""}}
+			_, err := s.collection.UpdateOne(ctx, bson.M{"_id": docID}, updateDoc)
+			return err
+		}
+		
+		return errors.New("invalid path format")
+	} else {
+		// Document mode - original implementation
+		// If path is empty or ".", delete the entire document
+		if path == "" || path == "." {
+			_, err := s.collection.DeleteOne(ctx, bson.M{"_id": s.documentID})
+			return err
+		}
+
+		// Otherwise, update the document by removing the value at the specified path
+		// First, get the current document
+		var doc Document
+		err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
+		if err != nil {
+			if err == mongo.ErrNoDocuments {
+				// Document doesn't exist, nothing to delete
+				return nil
+			}
+			return err
+		}
+
+		// Delete the value at the specified path
+		matcher := query.NewMatcher()
+		err = matcher.Delete(doc.Data, path)
+		if err != nil {
+			if err == query.ErrPathNotFound {
+				// Path doesn't exist, nothing to delete
+				return nil
+			}
+			return err
+		}
+
+		// Update the document
+		_, err = s.collection.ReplaceOne(ctx, bson.M{"_id": s.documentID}, doc)
 		return err
 	}
-
-	// Update the document
-	_, err = s.collection.ReplaceOne(ctx, bson.M{"_id": s.documentID}, doc)
-	return err
 }
 
 // ToJSON serializes the entire store to JSON
@@ -336,19 +655,49 @@ func (s *MongoStore) ToJSON() ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Get the document
-	var doc Document
-	err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			// If document doesn't exist, return an empty JSON object
-			return []byte("{}"), nil
+	// Different handling based on mode
+	if s.useCollection {
+		// In collection mode, get all documents
+		cursor, err := s.collection.Find(ctx, bson.M{})
+		if err != nil {
+			return nil, err
 		}
-		return nil, err
-	}
+		defer cursor.Close(ctx)
+		
+		// Decode all documents
+		var results []bson.M
+		if err := cursor.All(ctx, &results); err != nil {
+			return nil, err
+		}
+		
+		// Create a map with document IDs as keys for better compatibility with the rest of the code
+		resultMap := make(map[string]interface{})
+		for _, doc := range results {
+			if id, ok := doc["_id"]; ok {
+				// Convert ID to string for key
+				idStr := fmt.Sprintf("%v", id)
+				resultMap[idStr] = doc
+			}
+		}
+		
+		// Serialize the map to JSON
+		return json.Marshal(resultMap)
+	} else {
+		// Document mode - original implementation
+		// Get the document
+		var doc Document
+		err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
+		if err != nil {
+			if err == mongo.ErrNoDocuments {
+				// If document doesn't exist, return an empty JSON object
+				return []byte("{}"), nil
+			}
+			return nil, err
+		}
 
-	// Serialize the data to JSON
-	return json.Marshal(doc.Data)
+		// Serialize the data to JSON
+		return json.Marshal(doc.Data)
+	}
 }
 
 // FindMatches finds all values matching a path expression
@@ -357,22 +706,104 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Get the document
-	var doc Document
-	err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			// If document doesn't exist, return an empty result
-			return []query.MatchResult{}, nil
+	// Different handling based on mode
+	if s.useCollection {
+		// For collection mode, first we get all documents (with potential filtering)
+		var filter bson.M = bson.M{}
+		
+		// If path contains a dot, the first part might be a document ID
+		if strings.Contains(path, ".") {
+			parts := strings.Split(path, ".")
+			if len(parts) > 0 {
+				// Try to find exact document ID first
+				docID := parts[0]
+				var doc bson.M
+				err := s.collection.FindOne(ctx, bson.M{"_id": docID}).Decode(&doc)
+				if err == nil {
+					// Document exists, use the matcher on this document with the rest of the path
+					subPath := strings.Join(parts[1:], ".")
+					matcher := query.NewMatcher()
+					results, err := matcher.Match(doc, subPath)
+					if err != nil {
+						return []query.MatchResult{}, err
+					}
+					
+					// Update the paths to include the document ID
+					for i := range results {
+						results[i].Path = docID + "." + results[i].Path
+					}
+					
+					return results, nil
+				}
+				
+				// If no document with that ID, continue with pattern matching on all documents
+			}
 		}
-		return nil, err
-	}
+		
+		// Get all documents and apply matcher
+		cursor, err := s.collection.Find(ctx, filter)
+		if err != nil {
+			return []query.MatchResult{}, err
+		}
+		defer cursor.Close(ctx)
+		
+		var allResults []query.MatchResult
+		
+		// Apply matcher to each document
+		matcher := query.NewMatcher()
+		docIndex := 0
+		
+		for cursor.Next(ctx) {
+			var doc bson.M
+			if err := cursor.Decode(&doc); err != nil {
+				continue // Skip documents that can't be decoded
+			}
+			
+			docID := fmt.Sprintf("%v", doc["_id"])
+			
+			// Apply pattern to this document
+			results, err := matcher.Match(doc, path)
+			if err == nil && len(results) > 0 {
+				// For each result, prepend the document ID to the path
+				for i := range results {
+					// If path is empty or ".", use document ID as path
+					if results[i].Path == "" || results[i].Path == "." {
+						results[i].Path = docID
+					} else {
+						results[i].Path = docID + "." + results[i].Path
+					}
+				}
+				
+				allResults = append(allResults, results...)
+			}
+			
+			docIndex++
+			// Limit to prevent excessive processing
+			if docIndex > 100 {
+				break
+			}
+		}
+		
+		return allResults, nil
+	} else {
+		// Document mode - original implementation
+		// Get the document
+		var doc Document
+		err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
+		if err != nil {
+			if err == mongo.ErrNoDocuments {
+				// If document doesn't exist, return an empty result
+				return []query.MatchResult{}, nil
+			}
+			return nil, err
+		}
 
-	// Create a matcher
-	matcher := query.NewMatcher()
-	
-	// Find matches
-	return matcher.Match(doc.Data, path)
+		// Create a matcher
+		matcher := query.NewMatcher()
+		
+		// Find matches
+		return matcher.Match(doc.Data, path)
+	}
 }
 
 // Disconnect closes the MongoDB connection when the store is no longer needed
@@ -410,6 +841,13 @@ func (s *MongoStore) DisplayStoreInfo() error {
 	}
 
 	log.Println("====== MongoDB Information ======")
+	
+	// Report the mode
+	if s.useCollection {
+		log.Println("Store Mode: Collection is root (each document in collection is root level)")
+	} else {
+		log.Printf("Store Mode: Document is root (ID: %s)", s.documentID)
+	}
 
 	// List databases
 	databases, err := s.client.ListDatabaseNames(ctx, bson.M{})
@@ -487,32 +925,74 @@ func (s *MongoStore) DisplayStoreInfo() error {
 					}
 					defer cursor.Close(ctx)
 					
-					var documents []Document
-					if err := cursor.All(ctx, &documents); err != nil {
-						log.Printf("      Error decoding documents: %v", err)
-						continue
-					}
-					
-					log.Printf("      Documents in %s (showing up to 10):", collName)
-					for i, doc := range documents {
-						// Convert document data to JSON for display
-						jsonData, err := json.MarshalIndent(doc, "        ", "  ")
-						if err != nil {
-							log.Printf("        Document %d (ID: %s) (error marshaling: %v)", i+1, doc.ID, err)
+					// If in collection mode, display documents differently
+					if s.useCollection {
+						// Display root documents
+						var documents []bson.M
+						if err := cursor.All(ctx, &documents); err != nil {
+							log.Printf("      Error decoding documents: %v", err)
 							continue
 						}
 						
-						jsonStr := string(jsonData)
-						// Truncate if too long
-						if len(jsonStr) > 500 {
-							jsonStr = jsonStr[:500] + "... (truncated)"
+						log.Printf("      Documents in %s (showing up to 10):", collName)
+						for i, doc := range documents {
+							var id interface{} = "unknown"
+							if val, ok := doc["_id"]; ok {
+								id = val
+							}
+							
+							// Convert document data to JSON for display
+							jsonData, err := json.MarshalIndent(doc, "        ", "  ")
+							if err != nil {
+								log.Printf("        Document %d (ID: %v) (error marshaling: %v)", i+1, id, err)
+								continue
+							}
+							
+							jsonStr := string(jsonData)
+							// Truncate if too long
+							if len(jsonStr) > 500 {
+								jsonStr = jsonStr[:500] + "... (truncated)"
+							}
+							
+							// Count fields
+							fieldCount := len(doc)
+							
+							log.Printf("        Document %d (ID: %v, Fields: %d): %s", 
+								i+1, id, fieldCount, jsonStr)
 						}
 						
-						log.Printf("        Document %d (ID: %s): %s", i+1, doc.ID, jsonStr)
-					}
-					
-					if count > 10 {
-						log.Printf("        ... and %d more documents", count-10)
+						if count > 10 {
+							log.Printf("        ... and %d more documents", count-10)
+						}
+					} else {
+						// Original document mode display
+						var documents []Document
+						if err := cursor.All(ctx, &documents); err != nil {
+							log.Printf("      Error decoding documents: %v", err)
+							continue
+						}
+						
+						log.Printf("      Documents in %s (showing up to 10):", collName)
+						for i, doc := range documents {
+							// Convert document data to JSON for display
+							jsonData, err := json.MarshalIndent(doc, "        ", "  ")
+							if err != nil {
+								log.Printf("        Document %d (ID: %s) (error marshaling: %v)", i+1, doc.ID, err)
+								continue
+							}
+							
+							jsonStr := string(jsonData)
+							// Truncate if too long
+							if len(jsonStr) > 500 {
+								jsonStr = jsonStr[:500] + "... (truncated)"
+							}
+							
+							log.Printf("        Document %d (ID: %s): %s", i+1, doc.ID, jsonStr)
+						}
+						
+						if count > 10 {
+							log.Printf("        ... and %d more documents", count-10)
+						}
 					}
 				} else {
 					// For other collections, show sample first document
@@ -549,25 +1029,58 @@ func (s *MongoStore) DisplayStoreInfo() error {
 	log.Printf("Current Database: %s", s.database.Name())
 	log.Printf("Current Collection: %s", s.collection.Name())
 	
-	// Get our specific document if it exists
-	var doc Document
-	err = s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
-	if err == nil {
-		// Get the size of the data
-		jsonData, err := json.Marshal(doc.Data)
+	// Display info based on mode
+	if s.useCollection {
+		// Collection mode - get collection summary
+		count, err := s.collection.CountDocuments(ctx, bson.M{})
 		if err == nil {
-			dataSizeKB := float64(len(jsonData)) / 1024.0
-			log.Printf("Current Document (ID: %s) Size: %.2f KB", s.documentID, dataSizeKB)
+			log.Printf("Current Collection Document Count: %d", count)
+		}
+		
+		// Get stats about document sizes (sample a few documents)
+		cursor, err := s.collection.Find(ctx, bson.M{}, options.Find().SetLimit(5))
+		if err == nil {
+			defer cursor.Close(ctx)
+			var totalSize int
+			var docsCount int
 			
-			// Count top-level keys
-			if doc.Data != nil {
-				log.Printf("Current Document Top-level Keys: %d", len(doc.Data))
+			for cursor.Next(ctx) {
+				var doc bson.M
+				if err := cursor.Decode(&doc); err == nil {
+					jsonData, err := json.Marshal(doc)
+					if err == nil {
+						totalSize += len(jsonData)
+						docsCount++
+					}
+				}
+			}
+			
+			if docsCount > 0 {
+				avgSize := float64(totalSize) / float64(docsCount)
+				log.Printf("Average Document Size (from sample): %.2f KB", avgSize/1024.0)
 			}
 		}
-	} else if err == mongo.ErrNoDocuments {
-		log.Printf("Current Document (ID: %s) does not exist yet", s.documentID)
 	} else {
-		log.Printf("Error retrieving current document: %v", err)
+		// Document mode - get specific document
+		var doc Document
+		err = s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
+		if err == nil {
+			// Get the size of the data
+			jsonData, err := json.Marshal(doc.Data)
+			if err == nil {
+				dataSizeKB := float64(len(jsonData)) / 1024.0
+				log.Printf("Current Document (ID: %s) Size: %.2f KB", s.documentID, dataSizeKB)
+				
+				// Count top-level keys
+				if doc.Data != nil {
+					log.Printf("Current Document Top-level Keys: %d", len(doc.Data))
+				}
+			}
+		} else if err == mongo.ErrNoDocuments {
+			log.Printf("Current Document (ID: %s) does not exist yet", s.documentID)
+		} else {
+			log.Printf("Error retrieving current document: %v", err)
+		}
 	}
 	
 	log.Println("================================")

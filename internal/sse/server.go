@@ -36,14 +36,18 @@ func NewServer(dataStore store.Store) *Server {
 	}
 
 	// MongoDB specific operations need to be handled differently since MongoStore is custom type
-	// We can look for a specific interface method only available on MongoStore
 	if mongoStore, ok := dataStore.(*store.MongoStore); ok {
 		// If this is a MongoStore, register change listener
-		if setListener, ok := interface{}(mongoStore).(interface{ SetChangeListener(func(string, interface{})) }); ok {
-			setListener.SetChangeListener(func(path string, value interface{}) {
-				s.BroadcastEvent(path, value, "update")
-			})
-		}
+		// All MongoStore instances have the SetChangeListener method
+		mongoStore.SetChangeListener(func(path string, value interface{}) {
+			// We need to determine if this is an update or a delete based on the value
+			eventType := "update"
+			if value == nil {
+				eventType = "delete"
+			}
+			
+			s.BroadcastEvent(path, value, eventType)
+		})
 	}
 
 	// Start the cleanup goroutine
