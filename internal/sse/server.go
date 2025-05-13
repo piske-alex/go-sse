@@ -564,7 +564,7 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 						if filteredValue, success := applyKeyValueFilters(value, filter.Conditions); success {
 							clientEventData["value"] = filteredValue
 							clientEventData["key_value_filtered"] = true
-							log.Printf("DEBUG: Applied key-value filtering to more specific path")
+							log.Printf("DEBUG: Applied key-value filtering to more specific path %s with field %s", path, fieldName)
 						}
 					}
 					
