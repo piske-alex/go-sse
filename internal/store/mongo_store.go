@@ -715,50 +715,46 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 			return nil, err
 		}
 
-		// Get the document ID and its corresponding data
-		var docID string
-		var docData bson.M
-		for k, v := range doc {
-			docID = strings.TrimPrefix(strings.TrimSuffix(k, ")"), "ObjectID(\"")
-			if m, ok := v.(bson.M); ok {
-				if data, ok := m["data"].(bson.M); ok {
-					docData = data
+		// Extract the nested data object
+		var dataObj bson.M
+		for _, v := range doc {
+			if docMap, ok := v.(bson.M); ok {
+				if data, ok := docMap["data"].(bson.M); ok {
+					dataObj = data
+					break
 				}
-				break
 			}
 		}
 
-		if docData == nil {
+		if dataObj == nil {
 			return []query.MatchResult{}, nil
 		}
 
-		// For root paths, return the entire data object
-		if path == "" || path == "." || path == "$" {
+		// Clean up the path
+		cleanPath := strings.TrimPrefix(path, ".data.")
+		cleanPath = strings.TrimPrefix(cleanPath, "data.")
+
+		// For root path, return the entire data object
+		if cleanPath == "" || cleanPath == "." || cleanPath == "$" {
 			return []query.MatchResult{
 				{
-					Path:  docID,
-					Value: docData,
+					Path:  ".",
+					Value: dataObj,
 				},
 			}, nil
 		}
 
-		// Remove the ".data" prefix if it exists
-		cleanPath := strings.TrimPrefix(path, ".data.")
-		cleanPath = strings.TrimPrefix(cleanPath, "data.")
-
-		// Use matcher for path filtering on the data object
-		matcher := query.NewMatcher()
-		results, err := matcher.Match(docData, cleanPath)
-		if err != nil {
-			return []query.MatchResult{}, err
+		// Get the specific field directly
+		if value, ok := dataObj[cleanPath]; ok {
+			return []query.MatchResult{
+				{
+					Path:  cleanPath,
+					Value: value,
+				},
+			}, nil
 		}
 
-		// Update paths to include document ID
-		for i := range results {
-			results[i].Path = docID + ".data." + results[i].Path
-		}
-
-		return results, nil
+		return []query.MatchResult{}, nil
 	} else {
 		// Document mode - original implementation
 		// Get the document
