@@ -702,13 +702,10 @@ func (s *MongoStore) ToJSON() ([]byte, error) {
 
 // FindMatches finds all values matching a path expression
 func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
-	// Create a context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Different handling based on mode
 	if s.useCollection {
-		// Get the first document from the collection
 		var doc bson.M
 		err := s.collection.FindOne(ctx, bson.M{}).Decode(&doc)
 		if err != nil {
@@ -718,36 +715,54 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 			return nil, err
 		}
 
-		// Create a matcher and apply it to the document
+		// Get the first (and only) key-value pair from the document
+		var actualDoc bson.M
+		for _, v := range doc {
+			if m, ok := v.(bson.M); ok {
+				actualDoc = m
+				break
+			}
+		}
+
+		if actualDoc == nil {
+			return []query.MatchResult{}, nil
+		}
+
+		// Handle special paths
+		if path == "" || path == "." || path == "$" {
+			return []query.MatchResult{
+				{
+					Path:  ".",
+					Value: actualDoc,
+				},
+			}, nil
+		}
+
+		// Use matcher for path filtering
 		matcher := query.NewMatcher()
-		results, err := matcher.Match(doc, path)
+		results, err := matcher.Match(actualDoc, path)
 		if err != nil {
 			return []query.MatchResult{}, err
 		}
 
-		// Update paths to include document ID if present
-		docID := fmt.Sprintf("%v", doc["_id"])
-		for i := range results {
-			if results[i].Path == "" || results[i].Path == "." {
-				results[i].Path = docID
-			} else {
-				results[i].Path = docID + "." + results[i].Path
-			}
-		}
-
 		return results, nil
 	} else {
-		// Document mode - original implementation remains unchanged
+		// Document mode - original implementation
+		// Get the document
 		var doc Document
 		err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
 		if err != nil {
 			if err == mongo.ErrNoDocuments {
+				// If document doesn't exist, return an empty result
 				return []query.MatchResult{}, nil
 			}
 			return nil, err
 		}
 
+		// Create a matcher
 		matcher := query.NewMatcher()
+		
+		// Find matches
 		return matcher.Match(doc.Data, path)
 	}
 }
