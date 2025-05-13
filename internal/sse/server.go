@@ -102,6 +102,7 @@ func (s *Server) AddClient(w http.ResponseWriter, r *http.Request, filterExprs [
 	// Try to respect filters if they exist
 	if len(client.Filters) > 0 {
 		// Get the root data first
+		log.Printf("Fetching initial data with %d filters for client %s", len(client.Filters), client.ID)
 		rootData, err := s.store.Get(".")
 		if err != nil {
 			log.Printf("Error fetching initial data for client %s: %v", client.ID, err)
@@ -111,8 +112,11 @@ func (s *Server) AddClient(w http.ResponseWriter, r *http.Request, filterExprs [
 			
 			// For each filter, try to find matching data
 			for _, filter := range client.Filters {
+				log.Printf("Processing filter '%s' for client %s", filter.Path, client.ID)
+				
 				// Simple case: if filter is "." or empty, send all data
 				if filter.Path == "." || filter.Path == "" {
+					log.Printf("Filter is root path, sending all data to client %s", client.ID)
 					eventData := map[string]interface{}{
 						"path":  ".",
 						"value": rootData,
@@ -124,11 +128,14 @@ func (s *Server) AddClient(w http.ResponseWriter, r *http.Request, filterExprs [
 				}
 				
 				// Try to get data for the specific filter path
+				log.Printf("Attempting direct path lookup for '%s' for client %s", filter.Path, client.ID)
 				data, err := s.store.Get(filter.Path)
 				if err != nil {
 					// If direct path doesn't work, try pattern matching
+					log.Printf("Direct path lookup failed, trying pattern matching for '%s' for client %s", filter.Path, client.ID)
 					matches, err := s.store.FindMatches(filter.Path) 
 					if err == nil && len(matches) > 0 {
+						log.Printf("Found %d pattern matches for '%s' for client %s", len(matches), filter.Path, client.ID)
 						// Send each match that hasn't been sent yet
 						for _, match := range matches {
 							if !sent[match.Path] {
@@ -139,11 +146,15 @@ func (s *Server) AddClient(w http.ResponseWriter, r *http.Request, filterExprs [
 								}
 								client.Send("initial_data", eventData)
 								sent[match.Path] = true
+								log.Printf("Sent pattern match data for path '%s' to client %s", match.Path, client.ID)
 							}
 						}
+					} else {
+						log.Printf("No pattern matches found for '%s' for client %s", filter.Path, client.ID)
 					}
 				} else if data != nil && !sent[filter.Path] {
 					// Send the data for this filter
+					log.Printf("Sending direct path data for '%s' to client %s", filter.Path, client.ID)
 					eventData := map[string]interface{}{
 						"path":  filter.Path,
 						"value": data,
@@ -156,6 +167,7 @@ func (s *Server) AddClient(w http.ResponseWriter, r *http.Request, filterExprs [
 		}
 	} else {
 		// No specific filters, just send the root data
+		log.Printf("No filters specified, sending root data to client %s", client.ID)
 		initialData, err := s.store.Get(".")
 		if err == nil && initialData != nil {
 			eventData := map[string]interface{}{
@@ -164,6 +176,7 @@ func (s *Server) AddClient(w http.ResponseWriter, r *http.Request, filterExprs [
 				"time":  time.Now().UnixNano() / int64(time.Millisecond),
 			}
 			client.Send("initial_data", eventData)
+			log.Printf("Successfully sent root data to client %s", client.ID)
 		} else {
 			// Log error but don't fail the connection
 			log.Printf("Error fetching initial data for client %s: %v", client.ID, err)
