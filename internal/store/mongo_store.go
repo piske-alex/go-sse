@@ -715,18 +715,22 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 			return nil, err
 		}
 
-		// Extract the nested data object
-		var dataObj bson.M
+		// First, get the ObjectID document
+		var objectIDDoc bson.M
 		for _, v := range doc {
-			if docMap, ok := v.(bson.M); ok {
-				if data, ok := docMap["data"].(bson.M); ok {
-					dataObj = data
-					break
-				}
+			if m, ok := v.(bson.M); ok {
+				objectIDDoc = m
+				break
 			}
 		}
 
-		if dataObj == nil {
+		if objectIDDoc == nil {
+			return []query.MatchResult{}, nil
+		}
+
+		// Get the data field
+		dataField, ok := objectIDDoc["data"].(bson.M)
+		if !ok {
 			return []query.MatchResult{}, nil
 		}
 
@@ -734,18 +738,8 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 		cleanPath := strings.TrimPrefix(path, ".data.")
 		cleanPath = strings.TrimPrefix(cleanPath, "data.")
 
-		// For root path, return the entire data object
-		if cleanPath == "" || cleanPath == "." || cleanPath == "$" {
-			return []query.MatchResult{
-				{
-					Path:  ".",
-					Value: dataObj,
-				},
-			}, nil
-		}
-
-		// Get the specific field directly
-		if value, ok := dataObj[cleanPath]; ok {
+		// Get the specific field directly from data
+		if value, ok := dataField[cleanPath]; ok {
 			return []query.MatchResult{
 				{
 					Path:  cleanPath,
