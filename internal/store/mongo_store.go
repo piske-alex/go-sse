@@ -708,100 +708,46 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 
 	// Different handling based on mode
 	if s.useCollection {
-		// For collection mode, first we get all documents (with potential filtering)
-		var filter bson.M = bson.M{}
-		
-		// If path contains a dot, the first part might be a document ID
-		if strings.Contains(path, ".") {
-			parts := strings.Split(path, ".")
-			if len(parts) > 0 {
-				// Try to find exact document ID first
-				docID := parts[0]
-				var doc bson.M
-				err := s.collection.FindOne(ctx, bson.M{"_id": docID}).Decode(&doc)
-				if err == nil {
-					// Document exists, use the matcher on this document with the rest of the path
-					subPath := strings.Join(parts[1:], ".")
-					matcher := query.NewMatcher()
-					results, err := matcher.Match(doc, subPath)
-					if err != nil {
-						return []query.MatchResult{}, err
-					}
-					
-					// Update the paths to include the document ID
-					for i := range results {
-						results[i].Path = docID + "." + results[i].Path
-					}
-					
-					return results, nil
-				}
-				
-				// If no document with that ID, continue with pattern matching on all documents
-			}
-		}
-		
-		// Get all documents and apply matcher
-		cursor, err := s.collection.Find(ctx, filter)
-		if err != nil {
-			return []query.MatchResult{}, err
-		}
-		defer cursor.Close(ctx)
-		
-		var allResults []query.MatchResult
-		
-		// Apply matcher to each document
-		matcher := query.NewMatcher()
-		docIndex := 0
-		
-		for cursor.Next(ctx) {
-			var doc bson.M
-			if err := cursor.Decode(&doc); err != nil {
-				continue // Skip documents that can't be decoded
-			}
-			
-			docID := fmt.Sprintf("%v", doc["_id"])
-			
-			// Apply pattern to this document
-			results, err := matcher.Match(doc, path)
-			if err == nil && len(results) > 0 {
-				// For each result, prepend the document ID to the path
-				for i := range results {
-					// If path is empty or ".", use document ID as path
-					if results[i].Path == "" || results[i].Path == "." {
-						results[i].Path = docID
-					} else {
-						results[i].Path = docID + "." + results[i].Path
-					}
-				}
-				
-				allResults = append(allResults, results...)
-			}
-			
-			docIndex++
-			// Limit to prevent excessive processing
-			if docIndex > 100 {
-				break
-			}
-		}
-		
-		return allResults, nil
-	} else {
-		// Document mode - original implementation
-		// Get the document
-		var doc Document
-		err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
+		// Get the first document from the collection
+		var doc bson.M
+		err := s.collection.FindOne(ctx, bson.M{}).Decode(&doc)
 		if err != nil {
 			if err == mongo.ErrNoDocuments {
-				// If document doesn't exist, return an empty result
 				return []query.MatchResult{}, nil
 			}
 			return nil, err
 		}
 
-		// Create a matcher
+		// Create a matcher and apply it to the document
 		matcher := query.NewMatcher()
-		
-		// Find matches
+		results, err := matcher.Match(doc, path)
+		if err != nil {
+			return []query.MatchResult{}, err
+		}
+
+		// Update paths to include document ID if present
+		docID := fmt.Sprintf("%v", doc["_id"])
+		for i := range results {
+			if results[i].Path == "" || results[i].Path == "." {
+				results[i].Path = docID
+			} else {
+				results[i].Path = docID + "." + results[i].Path
+			}
+		}
+
+		return results, nil
+	} else {
+		// Document mode - original implementation remains unchanged
+		var doc Document
+		err := s.collection.FindOne(ctx, bson.M{"_id": s.documentID}).Decode(&doc)
+		if err != nil {
+			if err == mongo.ErrNoDocuments {
+				return []query.MatchResult{}, nil
+			}
+			return nil, err
+		}
+
+		matcher := query.NewMatcher()
 		return matcher.Match(doc.Data, path)
 	}
 }
