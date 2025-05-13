@@ -2,6 +2,7 @@ package sse
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -210,6 +211,9 @@ func (s *Server) RemoveClient(clientID string) {
 
 // BroadcastEvent sends an event to all matching clients
 func (s *Server) BroadcastEvent(path string, value interface{}, eventType string) {
+	// Log the original event data
+	log.Printf("DEBUG: BroadcastEvent called with path: %s, eventType: %s", path, eventType)
+	
 	// Create a list of clients to notify
 	s.clientsMutex.RLock()
 	var clientsToNotify []*Client
@@ -219,6 +223,8 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 		}
 	}
 	s.clientsMutex.RUnlock()
+	
+	log.Printf("DEBUG: Found %d clients to notify", len(clientsToNotify))
 
 	// Create the event payload
 	eventData := map[string]interface{}{
@@ -229,6 +235,13 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 
 	// Send to all matching clients
 	for _, client := range clientsToNotify {
+		// Log filters for this client
+		filterPaths := make([]string, 0, len(client.Filters))
+		for _, f := range client.Filters {
+			filterPaths = append(filterPaths, f.Path)
+		}
+		log.Printf("DEBUG: Client %s has filters: %v", client.ID, filterPaths)
+		
 		// For each client, check if we need to apply filter transformation
 		if len(client.Filters) > 0 {
 			// Create a copy of the event data to modify for this client
@@ -239,12 +252,37 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 			
 			// Check each filter to see if it's a specific field request
 			for _, filter := range client.Filters {
-				// If the filter path is more specific than the data path
-				// and the data path is a prefix of the filter path,
-				// then we're looking for a specific field within the data
+				log.Printf("DEBUG: Processing filter %s against path %s", filter.Path, path)
+				
+				// Special case for .data.positions
+				if filter.Path == ".data.positions" || filter.Path == "data.positions" {
+					log.Printf("DEBUG: Special case for .data.positions")
+					
+					// Try to extract positions directly
+					if valueMap, ok := value.(map[string]interface{}); ok {
+						log.Printf("DEBUG: Value is a map with keys: %v", getMapKeys(valueMap))
+						
+						// Check for data.positions directly in the value
+						if data, ok := valueMap["data"].(map[string]interface{}); ok {
+							log.Printf("DEBUG: Found data field with keys: %v", getMapKeys(data))
+							
+							if positions, ok := data["positions"]; ok {
+								log.Printf("DEBUG: Found positions field in data")
+								clientEventData["value"] = positions
+								clientEventData["filtered"] = true
+								log.Printf("DEBUG: Applied .data.positions filter, returning only positions data")
+								break
+							}
+						}
+					}
+				}
+				
+				// Standard prefix matching
 				if path != filter.Path && 
 				   strings.HasPrefix(filter.Path, path) && 
 				   len(filter.Path) > len(path) {
+					
+					log.Printf("DEBUG: Filter path is more specific than data path")
 					
 					// Try to extract just the filtered data
 					// Get the remaining path after the data path
@@ -252,11 +290,15 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 					if strings.HasPrefix(remainingPath, ".") {
 						remainingPath = remainingPath[1:] // Remove leading dot
 						
+						log.Printf("DEBUG: Remaining path after removing prefix: %s", remainingPath)
+						
 						// Create a matcher to extract the specific field
 						matcher := query.NewMatcher()
 						
 						// Construct a path to get the specific field
 						extractPath := "." + remainingPath
+						
+						log.Printf("DEBUG: Trying to extract data with path: %s", extractPath)
 						
 						// Try to get the specific field
 						filteredValue, err := matcher.Get(value, extractPath)
@@ -264,13 +306,18 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 							// Replace the full data with just the filtered data
 							clientEventData["value"] = filteredValue
 							clientEventData["filtered"] = true
-							log.Printf("Applied filter %s to data at path %s for client %s", 
-								filter.Path, path, client.ID)
+							log.Printf("DEBUG: Successfully extracted filtered value: %T", filteredValue)
 							break
+						} else {
+							log.Printf("DEBUG: Failed to extract filtered value: %v", err)
 						}
 					}
 				}
 			}
+			
+			// Log the final data structure
+			jsonData, _ := json.Marshal(clientEventData)
+			log.Printf("DEBUG: Final event data to send: %s", string(jsonData))
 			
 			// Send the possibly modified event data
 			client.Send(eventType, clientEventData)
@@ -279,6 +326,15 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 			client.Send(eventType, eventData)
 		}
 	}
+}
+
+// Helper function to get map keys for logging
+func getMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // Shutdown gracefully shuts down the SSE server

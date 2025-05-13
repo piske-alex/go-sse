@@ -260,6 +260,52 @@ func (s *MongoStore) Get(path string) (interface{}, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// Special case for .data.positions path
+	if path == ".data.positions" || path == "data.positions" {
+		log.Printf("Special case handling for path: %s", path)
+		
+		// Create a projection to get only the positions field
+		projection := bson.M{"data.positions": 1}
+		
+		var result bson.M
+		if s.useCollection {
+			err := s.collection.FindOne(ctx, bson.M{}, options.FindOne().SetProjection(projection)).Decode(&result)
+			if err != nil {
+				log.Printf("Error getting positions: %v", err)
+				return nil, err
+			}
+			
+			// Extract just the positions
+			if data, ok := result["data"].(bson.M); ok {
+				if positions, ok := data["positions"]; ok {
+					log.Printf("Successfully extracted positions")
+					return positions, nil
+				}
+			}
+		} else {
+			// In document mode
+			var doc Document
+			err := s.collection.FindOne(
+				ctx, 
+				bson.M{"_id": s.documentID}, 
+				options.FindOne().SetProjection(projection),
+			).Decode(&doc)
+			
+			if err != nil {
+				log.Printf("Error getting positions: %v", err)
+				return nil, err
+			}
+			
+			// Extract positions from the document
+			if doc.Data != nil {
+				if positions, ok := doc.Data["positions"]; ok {
+					log.Printf("Successfully extracted positions from document")
+					return positions, nil
+				}
+			}
+		}
+	}
+
 	// Different handling based on mode
 	if s.useCollection {
 		// In collection mode, use MongoDB query directly
