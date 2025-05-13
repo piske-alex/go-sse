@@ -715,34 +715,47 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 			return nil, err
 		}
 
-		// Get the first (and only) key-value pair from the document
-		var actualDoc bson.M
-		for _, v := range doc {
+		// Get the document ID and its corresponding data
+		var docID string
+		var docData bson.M
+		for k, v := range doc {
+			docID = strings.TrimPrefix(strings.TrimSuffix(k, ")"), "ObjectID(\"")
 			if m, ok := v.(bson.M); ok {
-				actualDoc = m
+				if data, ok := m["data"].(bson.M); ok {
+					docData = data
+				}
 				break
 			}
 		}
 
-		if actualDoc == nil {
+		if docData == nil {
 			return []query.MatchResult{}, nil
 		}
 
-		// Handle special paths
+		// For root paths, return the entire data object
 		if path == "" || path == "." || path == "$" {
 			return []query.MatchResult{
 				{
-					Path:  ".",
-					Value: actualDoc,
+					Path:  docID,
+					Value: docData,
 				},
 			}, nil
 		}
 
-		// Use matcher for path filtering
+		// Remove the ".data" prefix if it exists
+		cleanPath := strings.TrimPrefix(path, ".data.")
+		cleanPath = strings.TrimPrefix(cleanPath, "data.")
+
+		// Use matcher for path filtering on the data object
 		matcher := query.NewMatcher()
-		results, err := matcher.Match(actualDoc, path)
+		results, err := matcher.Match(docData, cleanPath)
 		if err != nil {
 			return []query.MatchResult{}, err
+		}
+
+		// Update paths to include document ID
+		for i := range results {
+			results[i].Path = docID + ".data." + results[i].Path
 		}
 
 		return results, nil
