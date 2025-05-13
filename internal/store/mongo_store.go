@@ -706,8 +706,22 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 	defer cancel()
 
 	if s.useCollection {
-		var doc bson.M
-		err := s.collection.FindOne(ctx, bson.M{}).Decode(&doc)
+		// Clean up the path
+		cleanPath := strings.TrimPrefix(path, ".data.")
+		cleanPath = strings.TrimPrefix(cleanPath, "data.")
+
+		// Create a projection to get only the specific field
+		projection := bson.M{
+			fmt.Sprintf("data.%s", cleanPath): 1,
+		}
+
+		var result bson.M
+		err := s.collection.FindOne(
+			ctx,
+			bson.M{},
+			options.FindOne().SetProjection(projection),
+		).Decode(&result)
+
 		if err != nil {
 			if err == mongo.ErrNoDocuments {
 				return []query.MatchResult{}, nil
@@ -715,37 +729,20 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 			return nil, err
 		}
 
-		// First, get the ObjectID document
-		var objectIDDoc bson.M
-		for _, v := range doc {
-			if m, ok := v.(bson.M); ok {
-				objectIDDoc = m
-				break
+		// Extract just the positions value
+		for _, doc := range result {
+			if docMap, ok := doc.(bson.M); ok {
+				if data, ok := docMap["data"].(bson.M); ok {
+					if value, ok := data[cleanPath]; ok {
+						return []query.MatchResult{
+							{
+								Path:  cleanPath,
+								Value: value,
+							},
+						}, nil
+					}
+				}
 			}
-		}
-
-		if objectIDDoc == nil {
-			return []query.MatchResult{}, nil
-		}
-
-		// Get the data field
-		dataField, ok := objectIDDoc["data"].(bson.M)
-		if !ok {
-			return []query.MatchResult{}, nil
-		}
-
-		// Clean up the path
-		cleanPath := strings.TrimPrefix(path, ".data.")
-		cleanPath = strings.TrimPrefix(cleanPath, "data.")
-
-		// Get the specific field directly from data
-		if value, ok := dataField[cleanPath]; ok {
-			return []query.MatchResult{
-				{
-					Path:  cleanPath,
-					Value: value,
-				},
-			}, nil
 		}
 
 		return []query.MatchResult{}, nil
