@@ -78,26 +78,38 @@ func (c *Client) Send(event string, data interface{}) error {
 		// Context still valid, continue
 	}
 
-	// Special case for filter handling - specific for .data.positions
+	// Generic filtering for any path in SSE events
 	if eventData, ok := data.(map[string]interface{}); ok {
 		// Check if this is a filtered event
 		if _, filtered := eventData["filtered"].(bool); filtered {
-			// Check for specific filter case
+			// Process for any filter path
 			for _, filter := range c.Filters {
-				if filter.Path == ".data.positions" || filter.Path == "data.positions" {
-					// For .data.positions filter, ensure we're only sending the positions data
-					if value, hasValue := eventData["value"]; hasValue {
-						// If data.positions exists in the value, extract just that
-						if valueMap, ok := value.(map[string]interface{}); ok {
-							if data, ok := valueMap["data"].(map[string]interface{}); ok {
-								if positions, ok := data["positions"]; ok {
-									// Replace the value with just the positions
-									eventData["value"] = positions
-								}
+				// Get the last part of the filter path (e.g., "positions" from ".data.positions")
+				parts := strings.Split(filter.Path, ".")
+				targetField := parts[len(parts)-1]
+
+				// Get the full value sent in the event
+				if value, hasValue := eventData["value"]; hasValue {
+					// Check if the value is already the specific field we want
+					if valueMap, ok := value.(map[string]interface{}); ok {
+						// Try to find the target field directly in the map
+						if _, exists := valueMap[targetField]; exists {
+							// No need to modify, we're already at the right level
+							continue
+						}
+
+						// Check for data.X pattern
+						if data, ok := valueMap["data"].(map[string]interface{}); ok {
+							// Check if the target field exists in data
+							if fieldValue, exists := data[targetField]; exists {
+								// Replace with just the specific field
+								eventData["value"] = fieldValue
+								// Log this transformation
+								eventData["filtered_field"] = targetField
+								break
 							}
 						}
 					}
-					break
 				}
 			}
 		}
@@ -170,32 +182,122 @@ func (c *Client) ShouldNotify(path string, value interface{}) bool {
 	for _, filter := range c.Filters {
 		// If the filter is more specific than the path
 		if strings.HasPrefix(filter.Path, path) {
-			// Check if this is the .data.positions filter
-			if filter.Path == ".data.positions" || filter.Path == "data.positions" {
-				// If data change happens at root or .data level, check if it affects positions
+			// Extract the target field from the filter path
+			// e.g. "positions" from ".data.positions"
+			parts := strings.Split(filter.Path, ".")
+			if len(parts) > 1 {
+				targetField := parts[len(parts)-1]
+				
+				// For root paths like "." or ".data", check if the value contains what client wants
 				if path == "." || path == ".data" || path == "data" {
-					// Look for data.positions in the change value
+					// Look for the target field in the change value
 					if valueMap, ok := value.(map[string]interface{}); ok {
-						// Check if data field exists
+						// First check if the target field is directly in the value
+						if fieldValue, exists := valueMap[targetField]; exists {
+							// We found the field, now check any key-value conditions
+							if len(filter.Conditions) > 0 {
+								// Apply key-value filtering
+								matches := matchesKeyValueConditions(fieldValue, filter.Conditions)
+								return matches
+							}
+							return true
+						}
+						
+						// Then check if it's in the data subfield
 						if data, ok := valueMap["data"].(map[string]interface{}); ok {
-							// Check if data has a positions field
-							if _, ok := data["positions"]; ok {
+							if fieldValue, exists := data[targetField]; exists {
+								// We found the field, now check any key-value conditions
+								if len(filter.Conditions) > 0 {
+									// Apply key-value filtering
+									matches := matchesKeyValueConditions(fieldValue, filter.Conditions)
+									return matches
+								}
 								return true
 							}
 						}
 					}
 				}
 			}
-			return true
+			
+			// If we couldn't find the exact field but the path is a prefix, still notify
+			// unless we have conditions that need to be checked
+			if len(filter.Conditions) == 0 {
+				return true
+			}
 		}
 	}
 
-	// Check if any filter matches the change
+	// Check if any filter matches the change directly
 	for _, filter := range c.Filters {
 		if filter.IsMatch(path, value) {
 			return true
 		}
 	}
+	return false
+}
+
+// matchesKeyValueConditions checks if data matches all conditions
+func matchesKeyValueConditions(data interface{}, conditions []query.KeyValueCondition) bool {
+	// If no conditions, everything matches
+	if len(conditions) == 0 {
+		return true
+	}
+	
+	// Handle array of items
+	if array, ok := data.([]interface{}); ok {
+		// For arrays, check if any item matches all conditions
+		for _, item := range array {
+			if itemMap, ok := item.(map[string]interface{}); ok {
+				allMatch := true
+				
+				// Check each condition against this item
+				for _, condition := range conditions {
+					if value, exists := itemMap[condition.Key]; exists {
+						// Convert to string for comparison
+						strValue := fmt.Sprintf("%v", value)
+						if strings.TrimSpace(strValue) != condition.Value {
+							allMatch = false
+							break
+						}
+					} else {
+						// Key doesn't exist in this item
+						allMatch = false
+						break
+					}
+				}
+				
+				// If all conditions match for this item, return true
+				if allMatch {
+					return true
+				}
+			}
+		}
+		
+		// No item matched all conditions
+		return false
+	}
+	
+	// Handle a single map
+	if itemMap, ok := data.(map[string]interface{}); ok {
+		// Check each condition
+		for _, condition := range conditions {
+			if value, exists := itemMap[condition.Key]; exists {
+				// Convert to string for comparison
+				strValue := fmt.Sprintf("%v", value)
+				if strings.TrimSpace(strValue) != condition.Value {
+					return false
+				}
+			} else {
+				// Key doesn't exist
+				return false
+			}
+		}
+		
+		// All conditions matched
+		return true
+	}
+	
+	// Can't match against this data type
 	return false
 }
 

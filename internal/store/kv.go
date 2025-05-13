@@ -174,32 +174,24 @@ func (s *KVStore) FindMatches(path string) ([]query.MatchResult, error) {
 	// Log input for debugging
 	log.Printf("KVStore.FindMatches called with path: %s", path)
 	
-	// Handle specific case for .data.positions
-	if path == ".data.positions" || path == "data.positions" {
-		// Try to directly get the value at the specific path
-		var result []query.MatchResult
-		
-		// First try data.positions directly
-		if data, ok := s.data["data"].(map[string]interface{}); ok {
-			if positions, ok := data["positions"]; ok {
-				log.Printf("Found positions at data.positions direct path")
-				result = append(result, query.MatchResult{
-					Path:  path,
-					Value: positions,
-				})
-				return result, nil
-			}
-		}
-		
-		// Next try data as the root key
-		if dataMap, ok := s.data["data"].(map[string]interface{}); ok {
-			if positions, ok := dataMap["positions"]; ok {
-				log.Printf("Found positions in data map")
-				result = append(result, query.MatchResult{
-					Path:  path,
-					Value: positions,
-				})
-				return result, nil
+	// Handle specific case for .data.X paths
+	if strings.HasPrefix(path, ".data.") || strings.HasPrefix(path, "data.") {
+		// Extract the field name after ".data."
+		parts := strings.Split(path, ".")
+		if len(parts) > 1 {
+			targetField := parts[len(parts)-1]
+			var result []query.MatchResult
+			
+			// First try getting the field from within "data"
+			if data, ok := s.data["data"].(map[string]interface{}); ok {
+				if fieldValue, ok := data[targetField]; ok {
+					log.Printf("Found %s at data.%s direct path", targetField, targetField)
+					result = append(result, query.MatchResult{
+						Path:  path,
+						Value: fieldValue,
+					})
+					return result, nil
+				}
 			}
 		}
 	}

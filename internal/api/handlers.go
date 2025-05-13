@@ -83,6 +83,25 @@ func (h *Handler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	if filterParam != "" {
 		filters = strings.Split(filterParam, ",")
 	}
+	
+	// Parse key-value filter parameters for advanced filtering
+	// Format: filter_key=fieldName&filter_value=expectedValue
+	filterKey := r.URL.Query().Get("filter_key")
+	filterValue := r.URL.Query().Get("filter_value")
+	
+	// If key-value filter is provided, convert it to a special filter format
+	// Format: .data.positions[trader=abc]
+	if filterKey != "" && filterValue != "" && len(filters) > 0 {
+		// Get the base path from the first filter (we'll apply the key-value filter to this path)
+		basePath := filters[0]
+		
+		// Create an enhanced filter that includes key-value filtering
+		enhancedFilter := fmt.Sprintf("%s[%s=%s]", basePath, filterKey, filterValue)
+		log.Printf("Added key-value filter: %s", enhancedFilter)
+		
+		// Replace the first filter with the enhanced one
+		filters[0] = enhancedFilter
+	}
 
 	// Parse initial_data parameter (optional, default is true)
 	sendInitialData := true
@@ -100,7 +119,7 @@ func (h *Handler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log client connection
-	log.Printf("SSE client connected: %s with filters: %v, initial data: %v", client.ID, filters, sendInitialData)
+	log.Printf("SSE client connected: %s with filters: %v", client.ID, filters)
 
 	// Keep the connection open until client disconnects
 	<-r.Context().Done()

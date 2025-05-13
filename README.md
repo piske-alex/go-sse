@@ -9,7 +9,7 @@ An efficient Go-based SSE (Server-Sent Events) server with JQ-style query suppor
 - Support for MongoDB for large JSON document storage
 - In-memory key-value store option for simpler deployments
 - JQ-style queries for data access and filtering
-- Client filtering capabilities
+- Client filtering capabilities with both path and key-value filtering
 - HTTP API for store management
 - Support for large POST requests (up to 20MB)
 
@@ -123,6 +123,44 @@ func main() {
 GET /events?filter=.data.users[*].status
 ```
 
+### Filtering Options
+
+#### Path Filtering (Basic)
+
+Use the `filter` parameter to specify which data paths you want to receive:
+
+```
+GET /events?filter=.data.positions
+```
+
+This will only send events related to the `data.positions` field.
+
+#### Key-Value Filtering (Advanced)
+
+You can also filter by specific field values using the syntax with conditions:
+
+```
+GET /events?filter=.data.positions[trader=abc]
+```
+
+This will only send events for positions where the `trader` field equals `abc`.
+
+The syntax for key-value filtering is:
+
+```
+filter=<path>[<key>=<value>]
+```
+
+You can use this with any data path and any field within that data.
+
+#### Multiple Filters
+
+Combine multiple filters to receive different types of data:
+
+```
+GET /events?filter=.data.positions[trader=abc]&filter=.data.offers[status=active]
+```
+
 ### Initialize KV Store
 
 ```
@@ -134,6 +172,14 @@ Content-Type: application/json
     "users": [
       {"id": 1, "name": "Alice", "status": "online"},
       {"id": 2, "name": "Bob", "status": "offline"}
+    ],
+    "positions": [
+      {"id": "pos1", "trader": "abc", "amount": 100},
+      {"id": "pos2", "trader": "xyz", "amount": 200}
+    ],
+    "offers": [
+      {"id": "off1", "status": "active", "price": 10.5},
+      {"id": "off2", "status": "pending", "price": 15.75}
     ],
     "config": {
       "maxUsers": 100,
@@ -157,6 +203,33 @@ Content-Type: application/json
 ```
 GET /store?path=.data.users[*]
 ```
+
+### Advanced Filter Examples
+
+1. Get all data:
+   ```
+   /events
+   ```
+
+2. Get only positions data:
+   ```
+   /events?filter=.data.positions
+   ```
+
+3. Get positions for a specific trader:
+   ```
+   /events?filter=.data.positions[trader=abc]
+   ```
+
+4. Get offers with a specific status:
+   ```
+   /events?filter=.data.offers[status=active]
+   ```
+
+5. Multiple filters with different key-value conditions:
+   ```
+   /events?filter=.data.positions[trader=abc]&filter=.data.offers[status=active]
+   ```
 
 ## Documentation
 
