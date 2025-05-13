@@ -706,9 +706,13 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 	defer cancel()
 
 	if s.useCollection {
+		// Log the incoming path for debugging
+		log.Printf("MongoStore.FindMatches called with path: %s", path)
+		
 		// Clean up the path
 		cleanPath := strings.TrimPrefix(path, ".data.")
 		cleanPath = strings.TrimPrefix(cleanPath, "data.")
+		log.Printf("Cleaned path: %s", cleanPath)
 
 		// Create a projection to get only the specific field
 		projection := bson.M{
@@ -724,27 +728,77 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 
 		if err != nil {
 			if err == mongo.ErrNoDocuments {
+				log.Printf("No documents found for path: %s", path)
 				return []query.MatchResult{}, nil
 			}
+			log.Printf("Error finding documents for path %s: %v", path, err)
 			return nil, err
 		}
 
+		log.Printf("FindMatches result: %+v", result)
+		
 		// Extract just the positions value
-		for _, doc := range result {
+		for key, doc := range result {
+			log.Printf("Found document with key %s", key)
 			if docMap, ok := doc.(bson.M); ok {
+				log.Printf("Document is a map with keys: %v", getMapKeys(docMap))
 				if data, ok := docMap["data"].(bson.M); ok {
+					log.Printf("Document has data field with keys: %v", getMapKeys(data))
 					if value, ok := data[cleanPath]; ok {
+						log.Printf("Found value for path %s", cleanPath)
 						return []query.MatchResult{
 							{
-								Path:  cleanPath,
+								Path:  path, // Use the original path here
 								Value: value,
 							},
 						}, nil
+					} else {
+						// Try deeper nested paths
+						nestedKeys := strings.Split(cleanPath, ".")
+						currentMap := data
+						var currentValue interface{} = nil
+						found := true
+						
+						for i, key := range nestedKeys {
+							log.Printf("Looking for nested key %s at level %d", key, i)
+							if i == len(nestedKeys)-1 {
+								// Last key, should be the value we want
+								if val, exists := currentMap[key]; exists {
+									currentValue = val
+									log.Printf("Found final nested value at key %s", key)
+								} else {
+									found = false
+									log.Printf("Final key %s not found", key)
+									break
+								}
+							} else {
+								// Not the last key, should be another map
+								if nextMap, exists := currentMap[key].(bson.M); exists {
+									currentMap = nextMap
+									log.Printf("Found nested map at key %s with keys: %v", key, getMapKeys(nextMap))
+								} else {
+									found = false
+									log.Printf("Nested key %s not found or not a map", key)
+									break
+								}
+							}
+						}
+						
+						if found && currentValue != nil {
+							log.Printf("Found value through nested path traversal")
+							return []query.MatchResult{
+								{
+									Path:  path, // Use the original path here
+									Value: currentValue,
+								},
+							}, nil
+						}
 					}
 				}
 			}
 		}
 
+		log.Printf("No matches found after processing document")
 		return []query.MatchResult{}, nil
 	} else {
 		// Document mode - original implementation
@@ -765,6 +819,15 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 		// Find matches
 		return matcher.Match(doc.Data, path)
 	}
+}
+
+// Helper function to get map keys for logging
+func getMapKeys(m bson.M) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // Disconnect closes the MongoDB connection when the store is no longer needed

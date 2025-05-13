@@ -2,6 +2,7 @@ package query
 
 import (
 	"errors"
+	"fmt"
 )
 
 // ErrInvalidPath indicates an invalid path expression
@@ -137,6 +138,7 @@ func (m *Matcher) navigateSegments(data interface{}, segments []PathSegment, ind
 func (m *Matcher) matchSegments(data interface{}, segments []PathSegment, index int, currentPath string, results *[]MatchResult) error {
 	// If we've processed all segments, add the result
 	if index >= len(segments) {
+		// Create a result with the current path and value
 		*results = append(*results, MatchResult{Path: currentPath, Value: data})
 		return nil
 	}
@@ -155,7 +157,14 @@ func (m *Matcher) matchSegments(data interface{}, segments []PathSegment, index 
 			return nil
 		}
 
-		newPath := currentPath + "." + segment.Value
+		// Construct new path
+		var newPath string
+		if currentPath == "" || currentPath == "." {
+			newPath = "." + segment.Value
+		} else {
+			newPath = currentPath + "." + segment.Value
+		}
+		
 		return m.matchSegments(value, segments, index+1, newPath, results)
 
 	case Index:
@@ -169,7 +178,8 @@ func (m *Matcher) matchSegments(data interface{}, segments []PathSegment, index 
 			return nil
 		}
 
-		newPath := currentPath + "[" + string(segment.Index) + "]"
+		// Construct new path
+		newPath := currentPath + "[" + fmt.Sprintf("%d", segment.Index) + "]"
 		return m.matchSegments(sliceData[segment.Index], segments, index+1, newPath, results)
 
 	case Wildcard:
@@ -180,7 +190,8 @@ func (m *Matcher) matchSegments(data interface{}, segments []PathSegment, index 
 		}
 
 		for i, item := range sliceData {
-			newPath := currentPath + "[" + string(i) + "]"
+			// Construct new path
+			newPath := currentPath + "[" + fmt.Sprintf("%d", i) + "]"
 			err := m.matchSegments(item, segments, index+1, newPath, results)
 			if err != nil {
 				// Continue despite errors in wildcard matching

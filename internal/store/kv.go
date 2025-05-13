@@ -171,15 +171,50 @@ func (s *KVStore) FindMatches(path string) ([]query.MatchResult, error) {
 	s.mux.RLock()
 	defer s.mux.RUnlock()
 	
+	// Log input for debugging
+	log.Printf("KVStore.FindMatches called with path: %s", path)
+	
+	// Handle specific case for .data.positions
+	if path == ".data.positions" || path == "data.positions" {
+		// Try to directly get the value at the specific path
+		var result []query.MatchResult
+		
+		// First try data.positions directly
+		if data, ok := s.data["data"].(map[string]interface{}); ok {
+			if positions, ok := data["positions"]; ok {
+				log.Printf("Found positions at data.positions direct path")
+				result = append(result, query.MatchResult{
+					Path:  path,
+					Value: positions,
+				})
+				return result, nil
+			}
+		}
+		
+		// Next try data as the root key
+		if dataMap, ok := s.data["data"].(map[string]interface{}); ok {
+			if positions, ok := dataMap["positions"]; ok {
+				log.Printf("Found positions in data map")
+				result = append(result, query.MatchResult{
+					Path:  path,
+					Value: positions,
+				})
+				return result, nil
+			}
+		}
+	}
+	
 	// Create a matcher
 	matcher := query.NewMatcher()
 	
 	// Find matches
 	results, err := matcher.Match(s.data, path)
 	if err != nil {
+		log.Printf("Matcher.Match error: %v", err)
 		return nil, err
 	}
 	
+	log.Printf("Found %d matches for path %s", len(results), path)
 	return results, nil
 }
 

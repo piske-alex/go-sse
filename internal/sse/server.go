@@ -4,10 +4,12 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/piske-alex/go-sse/internal/store"
+	"github.com/piske-alex/go-sse/internal/query"
 )
 
 // Server manages SSE client connections and broadcasting
@@ -143,6 +145,7 @@ func (s *Server) AddClient(w http.ResponseWriter, r *http.Request, filterExprs [
 									"path":  match.Path,
 									"value": match.Value,
 									"time":  time.Now().UnixNano() / int64(time.Millisecond),
+									"filtered": true,
 								}
 								client.Send("initial_data", eventData)
 								sent[match.Path] = true
@@ -159,6 +162,7 @@ func (s *Server) AddClient(w http.ResponseWriter, r *http.Request, filterExprs [
 						"path":  filter.Path,
 						"value": data,
 						"time":  time.Now().UnixNano() / int64(time.Millisecond),
+						"filtered": true,
 					}
 					client.Send("initial_data", eventData)
 					sent[filter.Path] = true
@@ -225,7 +229,55 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 
 	// Send to all matching clients
 	for _, client := range clientsToNotify {
-		client.Send(eventType, eventData)
+		// For each client, check if we need to apply filter transformation
+		if len(client.Filters) > 0 {
+			// Create a copy of the event data to modify for this client
+			clientEventData := make(map[string]interface{})
+			for k, v := range eventData {
+				clientEventData[k] = v
+			}
+			
+			// Check each filter to see if it's a specific field request
+			for _, filter := range client.Filters {
+				// If the filter path is more specific than the data path
+				// and the data path is a prefix of the filter path,
+				// then we're looking for a specific field within the data
+				if path != filter.Path && 
+				   strings.HasPrefix(filter.Path, path) && 
+				   len(filter.Path) > len(path) {
+					
+					// Try to extract just the filtered data
+					// Get the remaining path after the data path
+					remainingPath := filter.Path[len(path):]
+					if strings.HasPrefix(remainingPath, ".") {
+						remainingPath = remainingPath[1:] // Remove leading dot
+						
+						// Create a matcher to extract the specific field
+						matcher := query.NewMatcher()
+						
+						// Construct a path to get the specific field
+						extractPath := "." + remainingPath
+						
+						// Try to get the specific field
+						filteredValue, err := matcher.Get(value, extractPath)
+						if err == nil {
+							// Replace the full data with just the filtered data
+							clientEventData["value"] = filteredValue
+							clientEventData["filtered"] = true
+							log.Printf("Applied filter %s to data at path %s for client %s", 
+								filter.Path, path, client.ID)
+							break
+						}
+					}
+				}
+			}
+			
+			// Send the possibly modified event data
+			client.Send(eventType, clientEventData)
+		} else {
+			// No filters, send the original event data
+			client.Send(eventType, eventData)
+		}
 	}
 }
 
