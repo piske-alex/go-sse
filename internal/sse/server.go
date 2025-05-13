@@ -121,7 +121,7 @@ func (s *Server) AddClient(w http.ResponseWriter, r *http.Request, filterExprs [
 				// Check if this filter has key-value conditions
 				hasConditions := len(filter.Conditions) > 0
 				if hasConditions {
-					log.Printf("Filter has %d key-value conditions", len(filter.Conditions))
+					log.Printf("Filter has %d key-value conditions: %+v", len(filter.Conditions), filter.Conditions)
 				}
 				
 				// Simple case: if filter is "." or empty, send all data
@@ -136,45 +136,22 @@ func (s *Server) AddClient(w http.ResponseWriter, r *http.Request, filterExprs [
 							if dataField, hasData := rootMap["data"].(map[string]interface{}); hasData {
 								// Process each data field
 								for field, value := range dataField {
-									// For array data, filter the items
-									if arrayData, isArray := value.([]interface{}); isArray {
-										var filteredItems []interface{}
+									// For array data, apply key-value filtering
+									if arrayData, isArray := value.([]interface{}); isArray && len(arrayData) > 0 {
+										log.Printf("Applying key-value filtering to initial data field: %s", field)
 										
-										// Check each item against conditions
-										for _, item := range arrayData {
-											if mapItem, isMap := item.(map[string]interface{}); isMap {
-												// Check all conditions
-												allMatch := true
-												for _, condition := range filter.Conditions {
-													if itemValue, hasKey := mapItem[condition.Key]; hasKey {
-														// Convert to string for comparison
-														strValue := fmt.Sprintf("%v", itemValue)
-														if strings.TrimSpace(strValue) != condition.Value {
-															allMatch = false
-															break
-														}
-													} else {
-														allMatch = false
-														break
-													}
-												}
-												
-												// If all conditions match, include this item
-												if allMatch {
-													filteredItems = append(filteredItems, item)
-												}
-											}
-										}
-										
-										// If we found matches, send filtered data
-										if len(filteredItems) > 0 {
-											log.Printf("Found %d items matching conditions in field %s", len(filteredItems), field)
+										// Use the common filtering function to ensure consistent behavior
+										if filteredValue, success := applyKeyValueFilters(arrayData, filter.Conditions); success {
+											log.Printf("Key-value filtering reduced array from %d items to %d items", 
+												len(arrayData), len(filteredValue.([]interface{})))
+											
+											// If we have filtered results, send them
 											eventData := map[string]interface{}{
-												"path":  ".data." + field,
-												"value": filteredItems,
-												"time":  time.Now().UnixNano() / int64(time.Millisecond),
-												"filtered": true,
-												"filtered_field": field,
+												"path":              ".data." + field,
+												"value":             filteredValue,
+												"time":              time.Now().UnixNano() / int64(time.Millisecond),
+												"filtered":          true,
+												"filtered_field":    field,
 												"key_value_filtered": true,
 											}
 											client.Send("initial_data", eventData)
@@ -212,193 +189,75 @@ func (s *Server) AddClient(w http.ResponseWriter, r *http.Request, filterExprs [
 								// Apply key-value filtering if needed
 								valueToSend := match.Value
 								if hasConditions {
-									// Check if the value is an array that can be filtered
-									if arrayData, isArray := valueToSend.([]interface{}); isArray {
-										var filteredItems []interface{}
-										
-										// Filter array items by conditions
-										for _, item := range arrayData {
-											if mapItem, isMap := item.(map[string]interface{}); isMap {
-												// Check all conditions
-												allMatch := true
-												for _, condition := range filter.Conditions {
-													if itemValue, hasKey := mapItem[condition.Key]; hasKey {
-														// Convert to string for comparison
-														strValue := fmt.Sprintf("%v", itemValue)
-														if strings.TrimSpace(strValue) != condition.Value {
-															allMatch = false
-															break
-														}
-													} else {
-														allMatch = false
-														break
-													}
-												}
-												
-												// If all conditions match, include this item
-												if allMatch {
-													filteredItems = append(filteredItems, item)
-												}
-											}
-										}
-										
-										// Use filtered items if we found any
-										if len(filteredItems) > 0 {
-											valueToSend = filteredItems
-										} else {
-											// No matches, skip this path
-											log.Printf("No items match key-value conditions for path %s", match.Path)
-											continue
-										}
-									} else if mapItem, isMap := valueToSend.(map[string]interface{}); isMap {
-										// For map data, check if it matches all conditions
-										allMatch := true
-										for _, condition := range filter.Conditions {
-											if itemValue, hasKey := mapItem[condition.Key]; hasKey {
-												// Convert to string for comparison
-												strValue := fmt.Sprintf("%v", itemValue)
-												if strings.TrimSpace(strValue) != condition.Value {
-													allMatch = false
-													break
-												}
-											} else {
-												allMatch = false
-												break
-											}
-										}
-										
-										// If it doesn't match, skip this path
-										if !allMatch {
-											log.Printf("Map data doesn't match key-value conditions for path %s", match.Path)
-											continue
-										}
+									// Use the common filtering function to ensure consistent behavior
+									if filteredValue, success := applyKeyValueFilters(valueToSend, filter.Conditions); success {
+										log.Printf("Applied key-value filtering to initial data match %s", match.Path)
+										valueToSend = filteredValue
 									}
 								}
 								
-								// Create a proper filtered payload
-								// Extract the specific field name from the filter path
-								parts := strings.Split(filter.Path, ".")
-								filterField := ""
-								if len(parts) > 1 {
-									filterField = parts[len(parts)-1]
-									log.Printf("Filter targets field '%s'", filterField)
+								// Check if after filtering we have valid data to send
+								// For arrays, check if there are any items left
+								shouldSend := true
+								if array, isArray := valueToSend.([]interface{}); isArray && len(array) == 0 {
+									log.Printf("Skipping empty array result after filtering for %s", match.Path)
+									shouldSend = false
 								}
 								
-								eventData := map[string]interface{}{
-									"path":  match.Path,
-									"value": valueToSend,
-									"time":  time.Now().UnixNano() / int64(time.Millisecond),
-									"filtered": true,
-									"filtered_field": filterField,
+								if shouldSend {
+									// Create and send the event
+									eventData := map[string]interface{}{
+										"path":              match.Path,
+										"value":             valueToSend,
+										"time":              time.Now().UnixNano() / int64(time.Millisecond),
+										"filtered":          true,
+										"key_value_filtered": hasConditions,
+									}
+									client.Send("initial_data", eventData)
+									sent[match.Path] = true
+									log.Printf("Sent filtered initial data for %s to client %s", match.Path, client.ID)
 								}
-								
-								// Add flag for key-value filtering
-								if hasConditions {
-									eventData["key_value_filtered"] = true
-								}
-								
-								client.Send("initial_data", eventData)
-								sent[match.Path] = true
-								log.Printf("Sent pattern match data for path '%s' to client %s", match.Path, client.ID)
 							}
 						}
 					} else {
-						log.Printf("No pattern matches found for '%s' for client %s", filter.Path, client.ID)
+						log.Printf("No pattern matches found for '%s' for client %s: %v", filter.Path, client.ID, err)
 					}
-				} else if data != nil && !sent[filter.Path] {
-					// Apply key-value filtering if needed
-					valueToSend := data
-					if hasConditions {
-						// Similar filtering logic as above
-						if arrayData, isArray := valueToSend.([]interface{}); isArray {
-							var filteredItems []interface{}
-							
-							// Filter array items by conditions
-							for _, item := range arrayData {
-								if mapItem, isMap := item.(map[string]interface{}); isMap {
-									// Check all conditions
-									allMatch := true
-									for _, condition := range filter.Conditions {
-										if itemValue, hasKey := mapItem[condition.Key]; hasKey {
-											// Convert to string for comparison
-											strValue := fmt.Sprintf("%v", itemValue)
-											if strings.TrimSpace(strValue) != condition.Value {
-												allMatch = false
-												break
-											}
-										} else {
-											allMatch = false
-											break
-										}
-									}
-									
-									// If all conditions match, include this item
-									if allMatch {
-										filteredItems = append(filteredItems, item)
-									}
-								}
-							}
-							
-							// Use filtered items if we found any
-							if len(filteredItems) > 0 {
-								valueToSend = filteredItems
-								log.Printf("Filtered data contains %d items that match conditions", len(filteredItems))
-							} else {
-								// No matches, skip this path
-								log.Printf("No items match key-value conditions for direct path %s", filter.Path)
-								continue
-							}
-						} else if mapItem, isMap := valueToSend.(map[string]interface{}); isMap {
-							// For map data, check if it matches all conditions
-							allMatch := true
-							for _, condition := range filter.Conditions {
-								if itemValue, hasKey := mapItem[condition.Key]; hasKey {
-									// Convert to string for comparison
-									strValue := fmt.Sprintf("%v", itemValue)
-									if strings.TrimSpace(strValue) != condition.Value {
-										allMatch = false
-										break
-									}
-								} else {
-									allMatch = false
-									break
-								}
-							}
-							
-							// If it doesn't match, skip this path
-							if !allMatch {
-								log.Printf("Map data doesn't match key-value conditions for direct path %s", filter.Path)
-								continue
+				} else if data != nil {
+					if !sent[filter.Path] {
+						// Apply key-value filtering if needed
+						valueToSend := data
+						if hasConditions {
+							// Use the common filtering function to ensure consistent behavior
+							if filteredValue, success := applyKeyValueFilters(valueToSend, filter.Conditions); success {
+								log.Printf("Applied key-value filtering to initial data for path %s", filter.Path)
+								valueToSend = filteredValue
 							}
 						}
+						
+						// Check if after filtering we have valid data to send
+						// For arrays, check if there are any items left
+						shouldSend := true
+						if array, isArray := valueToSend.([]interface{}); isArray && len(array) == 0 {
+							log.Printf("Skipping empty array result after filtering for %s", filter.Path)
+							shouldSend = false
+						}
+						
+						if shouldSend {
+							// Create and send the event
+							eventData := map[string]interface{}{
+								"path":              filter.Path,
+								"value":             valueToSend,
+								"time":              time.Now().UnixNano() / int64(time.Millisecond),
+								"filtered":          true,
+								"key_value_filtered": hasConditions,
+							}
+							client.Send("initial_data", eventData)
+							sent[filter.Path] = true
+							log.Printf("Sent filtered initial data for %s to client %s", filter.Path, client.ID)
+						}
 					}
-					
-					// Send the data for this filter
-					log.Printf("Sending direct path data for '%s' to client %s", filter.Path, client.ID)
-					
-					// Extract the specific field name from the filter path
-					parts := strings.Split(filter.Path, ".")
-					filterField := ""
-					if len(parts) > 1 {
-						filterField = parts[len(parts)-1]
-						log.Printf("Filter targets field '%s'", filterField)
-					}
-					
-					eventData := map[string]interface{}{
-						"path":  filter.Path,
-						"value": valueToSend,
-						"time":  time.Now().UnixNano() / int64(time.Millisecond),
-						"filtered": true,
-						"filtered_field": filterField,
-					}
-					
-					// Add flag for key-value filtering
-					if hasConditions {
-						eventData["key_value_filtered"] = true
-					}
-					
-					client.Send("initial_data", eventData)
-					sent[filter.Path] = true
+				} else {
+					log.Printf("No data found for filter path '%s' for client %s", filter.Path, client.ID)
 				}
 			}
 		}
@@ -446,6 +305,11 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 	// Log the original event data
 	log.Printf("DEBUG: BroadcastEvent called with path: %s, eventType: %s", path, eventType)
 	
+	// Check if the path contains key-value conditions
+	if strings.Contains(path, "[") && strings.Contains(path, "=") && strings.Contains(path, "]") {
+		log.Printf("DEBUG: Path contains key-value conditions: %s", path)
+	}
+	
 	// Create a list of clients to notify
 	s.clientsMutex.RLock()
 	var clientsToNotify []*Client
@@ -489,7 +353,7 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 				// Check if this filter has conditions (key-value filters)
 				hasConditions := len(filter.Conditions) > 0
 				if hasConditions {
-					log.Printf("DEBUG: Filter has %d conditions", len(filter.Conditions))
+					log.Printf("DEBUG: Filter has %d conditions: %+v", len(filter.Conditions), filter.Conditions)
 				}
 				
 				// Generic filtering approach for any data path
@@ -501,9 +365,10 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 					// If there are conditions, we need to filter the data by those conditions
 					if hasConditions {
 						if filteredValue, success := applyKeyValueFilters(value, filter.Conditions); success {
+							log.Printf("DEBUG: Applied key-value filtering to exact path match. Before: %T %+v, After: %T %+v", 
+								value, value, filteredValue, filteredValue)
 							clientEventData["value"] = filteredValue
 							clientEventData["key_value_filtered"] = true
-							log.Printf("DEBUG: Applied key-value filtering to exact path match")
 						}
 					}
 					
@@ -535,9 +400,10 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 							// If there are conditions, apply key-value filtering
 							if hasConditions {
 								if kv_filtered, success := applyKeyValueFilters(filteredValue, filter.Conditions); success {
+									log.Printf("DEBUG: Applied key-value filtering to extracted path. Before: %T %+v, After: %T %+v", 
+										filteredValue, filteredValue, kv_filtered, kv_filtered)
 									clientEventData["value"] = kv_filtered
 									clientEventData["key_value_filtered"] = true
-									log.Printf("DEBUG: Applied key-value filtering to extracted path")
 								}
 							}
 							
@@ -562,9 +428,10 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 						
 						// Apply key-value filtering to the data
 						if filteredValue, success := applyKeyValueFilters(value, filter.Conditions); success {
+							log.Printf("DEBUG: Applied key-value filtering to more specific path %s with field %s. Before: %T %+v, After: %T %+v", 
+								path, fieldName, value, value, filteredValue, filteredValue)
 							clientEventData["value"] = filteredValue
 							clientEventData["key_value_filtered"] = true
-							log.Printf("DEBUG: Applied key-value filtering to more specific path %s with field %s", path, fieldName)
 						}
 					}
 					
@@ -592,9 +459,10 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 								// Apply key-value filtering if needed
 								if hasConditions {
 									if kv_filtered, success := applyKeyValueFilters(filteredValue, filter.Conditions); success {
+										log.Printf("DEBUG: Applied key-value filtering to data field. Before: %T %+v, After: %T %+v", 
+											filteredValue, filteredValue, kv_filtered, kv_filtered)
 										filteredValue = kv_filtered
 										clientEventData["key_value_filtered"] = true
-										log.Printf("DEBUG: Applied key-value filtering to data field")
 									}
 								}
 								
@@ -608,6 +476,17 @@ func (s *Server) BroadcastEvent(path string, value interface{}, eventType string
 			}
 			
 			// Log the final data structure
+			valueType := fmt.Sprintf("%T", clientEventData["value"])
+			log.Printf("DEBUG: Final event data type: %s", valueType)
+			
+			// For array values, log the length and sample
+			if array, ok := clientEventData["value"].([]interface{}); ok {
+				log.Printf("DEBUG: Final array length: %d", len(array))
+				if len(array) > 0 {
+					log.Printf("DEBUG: First item sample: %+v", array[0])
+				}
+			}
+			
 			jsonData, _ := json.Marshal(clientEventData)
 			log.Printf("DEBUG: Final event data to send: %s", string(jsonData))
 			

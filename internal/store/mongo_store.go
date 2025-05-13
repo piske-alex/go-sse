@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
+	"regexp"
 	"strings"
 	"time"
 
@@ -259,11 +261,37 @@ func (s *MongoStore) Get(path string) (interface{}, error) {
 	// Create a context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	
+	// Extract key-value conditions from path if present
+	var cleanPath string = path
+	var keyValueConditions []string
+	
+	// Check if the path contains key-value conditions like [key=value]
+	if strings.Contains(path, "[") && strings.Contains(path, "=") && strings.Contains(path, "]") {
+		// Extract the condition part
+		re := regexp.MustCompile(`\[([^=\[\]]+)=([^\[\]]+)\]`)
+		matches := re.FindAllStringSubmatch(path, -1)
+		
+		if len(matches) > 0 {
+			// Store the conditions for later use
+			for _, match := range matches {
+				if len(match) >= 3 {
+					keyValueConditions = append(keyValueConditions, fmt.Sprintf("%s=%s", 
+						strings.TrimSpace(match[1]), strings.TrimSpace(match[2])))
+				}
+			}
+			
+			// Clean the path by removing the conditions
+			cleanPath = re.ReplaceAllString(path, "")
+			log.Printf("Path with key-value condition detected. Original path: %s, Clean path: %s, Conditions: %v", 
+				path, cleanPath, keyValueConditions)
+		}
+	}
 
 	// Special handling for .data.X paths
-	if strings.HasPrefix(path, ".data.") || strings.HasPrefix(path, "data.") {
+	if strings.HasPrefix(cleanPath, ".data.") || strings.HasPrefix(cleanPath, "data.") {
 		// Get the target field (like "positions", "offers", etc.)
-		parts := strings.Split(path, ".")
+		parts := strings.Split(cleanPath, ".")
 		if len(parts) > 1 {
 			targetField := parts[len(parts)-1]
 			log.Printf("Special case handling for data.%s path", targetField)
@@ -283,6 +311,13 @@ func (s *MongoStore) Get(path string) (interface{}, error) {
 				if data, ok := result["data"].(bson.M); ok {
 					if fieldValue, ok := data[targetField]; ok {
 						log.Printf("Successfully extracted %s", targetField)
+						
+						// Apply key-value filtering if needed
+						if len(keyValueConditions) > 0 {
+							fieldValue = s.applyKeyValueFiltering(fieldValue, keyValueConditions)
+							log.Printf("Applied key-value filtering to %s", targetField)
+						}
+						
 						return fieldValue, nil
 					}
 				}
@@ -304,6 +339,13 @@ func (s *MongoStore) Get(path string) (interface{}, error) {
 				if doc.Data != nil {
 					if fieldValue, ok := doc.Data[targetField]; ok {
 						log.Printf("Successfully extracted %s from document", targetField)
+						
+						// Apply key-value filtering if needed
+						if len(keyValueConditions) > 0 {
+							fieldValue = s.applyKeyValueFiltering(fieldValue, keyValueConditions)
+							log.Printf("Applied key-value filtering to %s", targetField)
+						}
+						
 						return fieldValue, nil
 					}
 				}
@@ -316,7 +358,7 @@ func (s *MongoStore) Get(path string) (interface{}, error) {
 		// In collection mode, use MongoDB query directly
 		
 		// If path is empty or ".", return all documents in collection
-		if path == "" || path == "." {
+		if cleanPath == "" || cleanPath == "." {
 			cursor, err := s.collection.Find(ctx, bson.M{})
 			if err != nil {
 				return nil, err
@@ -344,13 +386,13 @@ func (s *MongoStore) Get(path string) (interface{}, error) {
 		// Check if path refers to a specific document ID
 		// Try simple ID lookup first (root document names)
 		var doc bson.M
-		err := s.collection.FindOne(ctx, bson.M{"_id": path}).Decode(&doc)
+		err := s.collection.FindOne(ctx, bson.M{"_id": cleanPath}).Decode(&doc)
 		if err == nil {
 			return doc, nil
 		}
 		
 		// If not direct ID, try to parse the path for nested document access
-		parts := strings.Split(path, ".")
+		parts := strings.Split(cleanPath, ".")
 		if len(parts) > 0 {
 			// First part might be document ID, rest is path within document
 			docID := parts[0]
@@ -419,13 +461,13 @@ func (s *MongoStore) Get(path string) (interface{}, error) {
 		}
 
 		// If path is empty or ".", return the entire data
-		if path == "" || path == "." {
+		if cleanPath == "" || cleanPath == "." {
 			return doc.Data, nil
 		}
 
 		// Parse the path and navigate the data
 		matcher := query.NewMatcher()
-		result, err := matcher.Get(doc.Data, path)
+		result, err := matcher.Get(doc.Data, cleanPath)
 		if err != nil {
 			if err == query.ErrPathNotFound {
 				return nil, ErrPathNotFound
@@ -433,8 +475,189 @@ func (s *MongoStore) Get(path string) (interface{}, error) {
 			return nil, err
 		}
 
+		// Apply key-value filtering if needed
+		if len(keyValueConditions) > 0 {
+			result = s.applyKeyValueFiltering(result, keyValueConditions)
+		}
+
 		return result, nil
 	}
+}
+
+// applyKeyValueFiltering filters data based on key-value conditions
+func (s *MongoStore) applyKeyValueFiltering(data interface{}, keyValueConditions []string) interface{} {
+	log.Printf("Applying key-value filtering with conditions: %v", keyValueConditions)
+	
+	// If there are no conditions, return the data as is
+	if len(keyValueConditions) == 0 {
+		return data
+	}
+	
+	// Parse conditions into key-value pairs for easier processing
+	conditions := make([]struct{ Key, Value string }, 0, len(keyValueConditions))
+	for _, cond := range keyValueConditions {
+		parts := strings.SplitN(cond, "=", 2)
+		if len(parts) == 2 {
+			conditions = append(conditions, struct{ Key, Value string }{
+				Key:   strings.TrimSpace(parts[0]),
+				Value: strings.TrimSpace(parts[1]),
+			})
+		}
+	}
+	
+	// If no valid conditions were parsed, return data as is
+	if len(conditions) == 0 {
+		return data
+	}
+	
+	// Handle different data types
+	
+	// Case 1: BSON Array (common in MongoDB responses)
+	if bsonArray, ok := data.(bson.A); ok {
+		log.Printf("Filtering BSON array data with %d items", len(bsonArray))
+		var filteredArray []interface{}
+		
+		for _, item := range bsonArray {
+			if mapItem, ok := item.(bson.M); ok {
+				// Check if this item matches all conditions
+				allMatch := true
+				for _, condition := range conditions {
+					if actualValue, exists := mapItem[condition.Key]; exists {
+						// Convert to string for comparison
+						actualValueStr := fmt.Sprintf("%v", actualValue)
+						if strings.TrimSpace(actualValueStr) != condition.Value {
+							allMatch = false
+							break
+						}
+					} else {
+						allMatch = false
+						break
+					}
+				}
+				
+				// If all conditions match, add this item to results
+				if allMatch {
+					filteredArray = append(filteredArray, item)
+				}
+			}
+		}
+		
+		log.Printf("Filtered BSON array from %d to %d items", len(bsonArray), len(filteredArray))
+		return filteredArray
+	}
+	
+	// Case 2: Go Array
+	if array, ok := data.([]interface{}); ok {
+		log.Printf("Filtering Go array data with %d items", len(array))
+		var filteredArray []interface{}
+		
+		for _, item := range array {
+			// Handle both BSON and Go map types
+			var mapItem map[string]interface{}
+			
+			// Check if it's a BSON map
+			if bsonMap, ok := item.(bson.M); ok {
+				// Convert BSON map to regular map for consistent processing
+				mapItem = map[string]interface{}(bsonMap)
+			} else if goMap, ok := item.(map[string]interface{}); ok {
+				mapItem = goMap
+			} else {
+				// Not a map type we can filter, skip
+				continue
+			}
+			
+			// Check if this item matches all conditions
+			allMatch := true
+			for _, condition := range conditions {
+				if actualValue, exists := mapItem[condition.Key]; exists {
+					// Convert to string for comparison
+					actualValueStr := fmt.Sprintf("%v", actualValue)
+					if strings.TrimSpace(actualValueStr) != condition.Value {
+						allMatch = false
+						break
+					}
+				} else {
+					allMatch = false
+					break
+				}
+			}
+			
+			// If all conditions match, add this item to results
+			if allMatch {
+				filteredArray = append(filteredArray, item)
+			}
+		}
+		
+		log.Printf("Filtered Go array from %d to %d items", len(array), len(filteredArray))
+		return filteredArray
+	}
+	
+	// Case 3: BSON Map (common in MongoDB responses)
+	if bsonMap, ok := data.(bson.M); ok {
+		log.Printf("Checking BSON map data with keys: %v", getMapKeys(bsonMap))
+		
+		// Check if this map matches all conditions
+		allMatch := true
+		for _, condition := range conditions {
+			if actualValue, exists := bsonMap[condition.Key]; exists {
+				// Convert to string for comparison
+				actualValueStr := fmt.Sprintf("%v", actualValue)
+				if strings.TrimSpace(actualValueStr) != condition.Value {
+					allMatch = false
+					break
+				}
+			} else {
+				allMatch = false
+				break
+			}
+		}
+		
+		// If all conditions match, return the map; otherwise return empty map
+		if allMatch {
+			return bsonMap
+		} else {
+			log.Printf("BSON map did not match all conditions")
+			return bson.M{}
+		}
+	}
+	
+	// Case 4: Go Map
+	if goMap, ok := data.(map[string]interface{}); ok {
+		// Get map keys for logging
+		mapKeys := make([]string, 0, len(goMap))
+		for k := range goMap {
+			mapKeys = append(mapKeys, k)
+		}
+		log.Printf("Checking Go map data with keys: %v", mapKeys)
+		
+		// Check if this map matches all conditions
+		allMatch := true
+		for _, condition := range conditions {
+			if actualValue, exists := goMap[condition.Key]; exists {
+				// Convert to string for comparison
+				actualValueStr := fmt.Sprintf("%v", actualValue)
+				if strings.TrimSpace(actualValueStr) != condition.Value {
+					allMatch = false
+					break
+				}
+			} else {
+				allMatch = false
+				break
+			}
+		}
+		
+		// If all conditions match, return the map; otherwise return empty map
+		if allMatch {
+			return goMap
+		} else {
+			log.Printf("Go map did not match all conditions")
+			return map[string]interface{}{}
+		}
+	}
+	
+	// Unsupported data type, return as is
+	log.Printf("Unsupported data type for filtering: %T", data)
+	return data
 }
 
 // Set updates a value at the given path
@@ -755,19 +978,45 @@ func (s *MongoStore) ToJSON() ([]byte, error) {
 func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	
+	// Extract key-value conditions from path if present
+	var cleanPath string = path
+	var keyValueConditions []string
+	
+	// Check if the path contains key-value conditions like [key=value]
+	if strings.Contains(path, "[") && strings.Contains(path, "=") && strings.Contains(path, "]") {
+		// Extract the condition part
+		re := regexp.MustCompile(`\[([^=\[\]]+)=([^\[\]]+)\]`)
+		matches := re.FindAllStringSubmatch(path, -1)
+		
+		if len(matches) > 0 {
+			// Store the conditions for later use
+			for _, match := range matches {
+				if len(match) >= 3 {
+					keyValueConditions = append(keyValueConditions, fmt.Sprintf("%s=%s", 
+						strings.TrimSpace(match[1]), strings.TrimSpace(match[2])))
+				}
+			}
+			
+			// Clean the path by removing the conditions
+			cleanPath = re.ReplaceAllString(path, "")
+			log.Printf("Path with key-value condition detected in FindMatches. Original path: %s, Clean path: %s, Conditions: %v", 
+				path, cleanPath, keyValueConditions)
+		}
+	}
 
 	if s.useCollection {
 		// Log the incoming path for debugging
 		log.Printf("MongoStore.FindMatches called with path: %s", path)
 		
 		// Clean up the path
-		cleanPath := strings.TrimPrefix(path, ".data.")
-		cleanPath = strings.TrimPrefix(cleanPath, "data.")
-		log.Printf("Cleaned path: %s", cleanPath)
+		cleanPathForMongo := strings.TrimPrefix(cleanPath, ".data.")
+		cleanPathForMongo = strings.TrimPrefix(cleanPathForMongo, "data.")
+		log.Printf("Cleaned path: %s", cleanPathForMongo)
 
 		// Create a projection to get only the specific field
 		projection := bson.M{
-			fmt.Sprintf("data.%s", cleanPath): 1,
+			fmt.Sprintf("data.%s", cleanPathForMongo): 1,
 		}
 
 		var result bson.M
@@ -795,17 +1044,24 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 				log.Printf("Document is a map with keys: %v", getMapKeys(docMap))
 				if data, ok := docMap["data"].(bson.M); ok {
 					log.Printf("Document has data field with keys: %v", getMapKeys(data))
-					if value, ok := data[cleanPath]; ok {
-						log.Printf("Found value for path %s", cleanPath)
+					if value, ok := data[cleanPathForMongo]; ok {
+						log.Printf("Found value for path %s", cleanPathForMongo)
+						
+						// Apply key-value filtering if needed
+						if len(keyValueConditions) > 0 {
+							value = s.applyKeyValueFiltering(value, keyValueConditions)
+							log.Printf("Applied key-value filtering to %s in FindMatches", cleanPathForMongo)
+						}
+						
 						return []query.MatchResult{
 							{
-								Path:  path, // Use the original path here
+								Path:  path, // Use the original path here with conditions
 								Value: value,
 							},
 						}, nil
 					} else {
 						// Try deeper nested paths
-						nestedKeys := strings.Split(cleanPath, ".")
+						nestedKeys := strings.Split(cleanPathForMongo, ".")
 						currentMap := data
 						var currentValue interface{} = nil
 						found := true
@@ -837,9 +1093,16 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 						
 						if found && currentValue != nil {
 							log.Printf("Found value through nested path traversal")
+							
+							// Apply key-value filtering if needed
+							if len(keyValueConditions) > 0 {
+								currentValue = s.applyKeyValueFiltering(currentValue, keyValueConditions)
+								log.Printf("Applied key-value filtering to nested value in FindMatches")
+							}
+							
 							return []query.MatchResult{
 								{
-									Path:  path, // Use the original path here
+									Path:  path, // Use the original path here with conditions
 									Value: currentValue,
 								},
 							}, nil
@@ -868,7 +1131,34 @@ func (s *MongoStore) FindMatches(path string) ([]query.MatchResult, error) {
 		matcher := query.NewMatcher()
 		
 		// Find matches
-		return matcher.Match(doc.Data, path)
+		results, err := matcher.Match(doc.Data, cleanPath)
+		if err != nil {
+			return nil, err
+		}
+		
+		// Apply key-value filtering if needed
+		if len(keyValueConditions) > 0 {
+			var filteredResults []query.MatchResult
+			
+			for _, result := range results {
+				filteredValue := s.applyKeyValueFiltering(result.Value, keyValueConditions)
+				
+				// Skip empty array results (no matches)
+				if array, ok := filteredValue.([]interface{}); ok && len(array) == 0 {
+					continue
+				}
+				
+				filteredResults = append(filteredResults, query.MatchResult{
+					Path:  result.Path,
+					Value: filteredValue,
+				})
+			}
+			
+			results = filteredResults
+			log.Printf("Applied key-value filtering to %d matches", len(results))
+		}
+		
+		return results, nil
 	}
 }
 

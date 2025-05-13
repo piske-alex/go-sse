@@ -3,7 +3,9 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"sync"
 	
@@ -47,15 +49,72 @@ func (s *KVStore) Get(path string) (interface{}, error) {
 	s.mux.RLock()
 	defer s.mux.RUnlock()
 
+	// Extract key-value conditions from path if present
+	var cleanPath string = path
+	var keyValueConditions []string
+	
+	// Check if the path contains key-value conditions like [key=value]
+	if strings.Contains(path, "[") && strings.Contains(path, "=") && strings.Contains(path, "]") {
+		// Extract the condition part
+		re := regexp.MustCompile(`\[([^=\[\]]+)=([^\[\]]+)\]`)
+		matches := re.FindAllStringSubmatch(path, -1)
+		
+		if len(matches) > 0 {
+			// Store the conditions for later use
+			for _, match := range matches {
+				if len(match) >= 3 {
+					keyValueConditions = append(keyValueConditions, fmt.Sprintf("%s=%s", 
+						strings.TrimSpace(match[1]), strings.TrimSpace(match[2])))
+				}
+			}
+			
+			// Clean the path by removing the conditions
+			cleanPath = re.ReplaceAllString(path, "")
+			log.Printf("Path with key-value condition detected. Original path: %s, Clean path: %s, Conditions: %v", 
+				path, cleanPath, keyValueConditions)
+		}
+	}
+
+	// Handle special case for .data.X paths with conditions
+	if strings.HasPrefix(cleanPath, ".data.") || strings.HasPrefix(cleanPath, "data.") {
+		// Extract the target field (like "positions", "offers", etc.)
+		parts := strings.Split(cleanPath, ".")
+		if len(parts) > 1 {
+			targetField := parts[len(parts)-1]
+			log.Printf("Special case handling for data.%s path", targetField)
+			
+			// Try to get the specific field from data
+			if dataMap, ok := s.data["data"].(map[string]interface{}); ok {
+				if fieldValue, exists := dataMap[targetField]; exists {
+					log.Printf("Found %s in data map", targetField)
+					
+					// Apply key-value filtering if needed
+					if len(keyValueConditions) > 0 {
+						fieldValue = s.applyKeyValueFiltering(fieldValue, keyValueConditions)
+						log.Printf("Applied key-value filtering to %s", targetField)
+					}
+					
+					return fieldValue, nil
+				}
+			}
+		}
+	}
+
 	// If path is empty or ".", return the entire store
-	if path == "" || path == "." {
+	if cleanPath == "" || cleanPath == "." {
 		return s.data, nil
 	}
 
 	// Parse the path and navigate the store
-	result, err := s.getValueByPath(s.data, path)
+	result, err := s.getValueByPath(s.data, cleanPath)
 	if err != nil {
 		return nil, err
+	}
+
+	// Apply key-value filtering if needed
+	if len(keyValueConditions) > 0 {
+		result = s.applyKeyValueFiltering(result, keyValueConditions)
+		log.Printf("Applied key-value filtering to result")
 	}
 
 	return result, nil
@@ -174,10 +233,36 @@ func (s *KVStore) FindMatches(path string) ([]query.MatchResult, error) {
 	// Log input for debugging
 	log.Printf("KVStore.FindMatches called with path: %s", path)
 	
+	// Extract key-value conditions from path if present
+	var cleanPath string = path
+	var keyValueConditions []string
+	
+	// Check if the path contains key-value conditions like [key=value]
+	if strings.Contains(path, "[") && strings.Contains(path, "=") && strings.Contains(path, "]") {
+		// Extract the condition part
+		re := regexp.MustCompile(`\[([^=\[\]]+)=([^\[\]]+)\]`)
+		matches := re.FindAllStringSubmatch(path, -1)
+		
+		if len(matches) > 0 {
+			// Store the conditions for later use
+			for _, match := range matches {
+				if len(match) >= 3 {
+					keyValueConditions = append(keyValueConditions, fmt.Sprintf("%s=%s", 
+						strings.TrimSpace(match[1]), strings.TrimSpace(match[2])))
+				}
+			}
+			
+			// Clean the path by removing the conditions
+			cleanPath = re.ReplaceAllString(path, "")
+			log.Printf("Path with key-value condition detected in FindMatches. Original path: %s, Clean path: %s, Conditions: %v", 
+				path, cleanPath, keyValueConditions)
+		}
+	}
+	
 	// Handle specific case for .data.X paths
-	if strings.HasPrefix(path, ".data.") || strings.HasPrefix(path, "data.") {
+	if strings.HasPrefix(cleanPath, ".data.") || strings.HasPrefix(cleanPath, "data.") {
 		// Extract the field name after ".data."
-		parts := strings.Split(path, ".")
+		parts := strings.Split(cleanPath, ".")
 		if len(parts) > 1 {
 			targetField := parts[len(parts)-1]
 			var result []query.MatchResult
@@ -186,8 +271,15 @@ func (s *KVStore) FindMatches(path string) ([]query.MatchResult, error) {
 			if data, ok := s.data["data"].(map[string]interface{}); ok {
 				if fieldValue, ok := data[targetField]; ok {
 					log.Printf("Found %s at data.%s direct path", targetField, targetField)
+					
+					// Apply key-value filtering if needed
+					if len(keyValueConditions) > 0 {
+						fieldValue = s.applyKeyValueFiltering(fieldValue, keyValueConditions)
+						log.Printf("Applied key-value filtering to %s in FindMatches", targetField)
+					}
+					
 					result = append(result, query.MatchResult{
-						Path:  path,
+						Path:  path, // Use original path with conditions
 						Value: fieldValue,
 					})
 					return result, nil
@@ -200,10 +292,32 @@ func (s *KVStore) FindMatches(path string) ([]query.MatchResult, error) {
 	matcher := query.NewMatcher()
 	
 	// Find matches
-	results, err := matcher.Match(s.data, path)
+	results, err := matcher.Match(s.data, cleanPath)
 	if err != nil {
 		log.Printf("Matcher.Match error: %v", err)
 		return nil, err
+	}
+	
+	// Apply key-value filtering if needed
+	if len(keyValueConditions) > 0 {
+		var filteredResults []query.MatchResult
+		
+		for _, result := range results {
+			filteredValue := s.applyKeyValueFiltering(result.Value, keyValueConditions)
+			
+			// Skip empty array results (no matches)
+			if array, ok := filteredValue.([]interface{}); ok && len(array) == 0 {
+				continue
+			}
+			
+			filteredResults = append(filteredResults, query.MatchResult{
+				Path:  result.Path,
+				Value: filteredValue,
+			})
+		}
+		
+		results = filteredResults
+		log.Printf("Applied key-value filtering to %d matches", len(results))
 	}
 	
 	log.Printf("Found %d matches for path %s", len(results), path)
@@ -352,4 +466,60 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// applyKeyValueFiltering filters data based on key-value conditions
+func (s *KVStore) applyKeyValueFiltering(data interface{}, conditions []string) interface{} {
+	// If no conditions or no data, return as is
+	if len(conditions) == 0 || data == nil {
+		return data
+	}
+	
+	// Parse conditions into key-value pairs
+	keyValuePairs := make(map[string]string)
+	for _, cond := range conditions {
+		parts := strings.Split(cond, "=")
+		if len(parts) == 2 {
+			keyValuePairs[parts[0]] = parts[1]
+		}
+	}
+	
+	// For array data, filter the items
+	if array, ok := data.([]interface{}); ok {
+		// Create a new array to hold matching items
+		var filtered []interface{}
+		
+		// Filter items based on conditions
+		for _, item := range array {
+			if mapItem, ok := item.(map[string]interface{}); ok {
+				// Check if this item matches all conditions
+				allMatch := true
+				for key, value := range keyValuePairs {
+					if fieldValue, ok := mapItem[key]; ok {
+						// Convert value to string for comparison
+						strValue := fmt.Sprintf("%v", fieldValue)
+						if strings.TrimSpace(strValue) != value {
+							allMatch = false
+							break
+						}
+					} else {
+						// Key doesn't exist
+						allMatch = false
+						break
+					}
+				}
+				
+				// Add matching items to result
+				if allMatch {
+					filtered = append(filtered, item)
+				}
+			}
+		}
+		
+		// Return filtered result (or empty array if no matches)
+		return filtered
+	}
+	
+	// For non-array data, return as-is
+	return data
 }
